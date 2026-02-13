@@ -1139,6 +1139,80 @@ async def on_text_message(update: Any, context: Any) -> None:
                     await writer.flush()
                 continue
 
+            if isinstance(ev, ExecApprovalRequest):
+                await writer.flush(force=True)
+                session_id = run.thread_id or state.active_session_id
+                trusted = []
+                if session_id:
+                    trusted = runtime.store.list_trusted_prefixes(
+                        machine_name=state.machine_name, session_id=session_id
+                    )
+                needs_prompt, prefix = should_prompt_for_approval(
+                    approval_policy=settings.approval_policy,
+                    command=ev.command,
+                    trusted_prefixes=trusted,
+                    prefix_tokens=runtime.cfg.approvals.prefix_tokens,
+                )
+                if not needs_prompt:
+                    await run.send_exec_approval(decision="approved", call_id=ev.call_id)
+                    continue
+
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                from tgcodex.bot.formatting import fmt_approval_prompt
+
+                pending = {
+                    "kind": "exec_approval",
+                    "command": ev.command,
+                    "cwd": ev.cwd,
+                    "reason": ev.reason,
+                    "call_id": ev.call_id,
+                    "outer_id": ev.outer_id,
+                    "prefix": prefix,
+                    "session_id": session_id,
+                }
+                runtime.store.set_active_run(
+                    chat_id=chat_id,
+                    run_id=run.run_id,
+                    status="waiting_approval",
+                    pending_action=pending,
+                )
+                if settings.approval_policy == "untrusted":
+                    # "Always ask" mode: don't offer prefix trust shortcuts.
+                    kb = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
+                                ),
+                                InlineKeyboardButton(
+                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
+                                ),
+                            ]
+                        ]
+                    )
+                else:
+                    kb = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
+                                ),
+                                InlineKeyboardButton(
+                                    "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
+                                ),
+                                InlineKeyboardButton(
+                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
+                                ),
+                            ]
+                        ]
+                    )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=fmt_approval_prompt(command=ev.command, cwd=ev.cwd, reason=ev.reason),
+                    reply_markup=kb,
+                )
+                continue
+
             if isinstance(ev, ToolStarted) and runtime.cfg.output.show_tool_output:
                 # In "Always ask" mode, treat tool starts as approval-gated even when Codex isn't
                 # emitting exec_approval_request events (codex exec --json runs non-interactively).
@@ -1262,80 +1336,6 @@ async def on_text_message(update: Any, context: Any) -> None:
 
             if isinstance(ev, TokenCount):
                 runtime.store.update_token_telemetry(chat_id, token=ev)
-                continue
-
-            if isinstance(ev, ExecApprovalRequest):
-                await writer.flush(force=True)
-                session_id = run.thread_id or state.active_session_id
-                trusted = []
-                if session_id:
-                    trusted = runtime.store.list_trusted_prefixes(
-                        machine_name=state.machine_name, session_id=session_id
-                    )
-                needs_prompt, prefix = should_prompt_for_approval(
-                    approval_policy=settings.approval_policy,
-                    command=ev.command,
-                    trusted_prefixes=trusted,
-                    prefix_tokens=runtime.cfg.approvals.prefix_tokens,
-                )
-                if not needs_prompt:
-                    await run.send_exec_approval(decision="approved", call_id=ev.call_id)
-                    continue
-
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                from tgcodex.bot.formatting import fmt_approval_prompt
-
-                pending = {
-                    "kind": "exec_approval",
-                    "command": ev.command,
-                    "cwd": ev.cwd,
-                    "reason": ev.reason,
-                    "call_id": ev.call_id,
-                    "outer_id": ev.outer_id,
-                    "prefix": prefix,
-                    "session_id": session_id,
-                }
-                runtime.store.set_active_run(
-                    chat_id=chat_id,
-                    run_id=run.run_id,
-                    status="waiting_approval",
-                    pending_action=pending,
-                )
-                if settings.approval_policy == "untrusted":
-                    # "Always ask" mode: don't offer prefix trust shortcuts.
-                    kb = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
-                            ]
-                        ]
-                    )
-                else:
-                    kb = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
-                            ]
-                        ]
-                    )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=fmt_approval_prompt(command=ev.command, cwd=ev.cwd, reason=ev.reason),
-                    reply_markup=kb,
-                )
                 continue
 
             if isinstance(ev, (ExecCommandOutputDelta, ExecCommandEnd)):
