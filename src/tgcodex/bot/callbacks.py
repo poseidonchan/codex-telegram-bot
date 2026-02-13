@@ -84,6 +84,10 @@ async def on_callback_query(update: Any, context: Any) -> None:
         answer_text = "Loading thinking levels..."
     elif data.startswith("thinking_select:"):
         answer_text = "Saved."
+    elif data.startswith("approval_mode_select:"):
+        answer_text = "Loading..."
+    elif data.startswith("approval_mode_confirm:"):
+        answer_text = "Saved."
     elif data == "cbtest_ping":
         answer_text = "pong"
 
@@ -137,10 +141,52 @@ async def on_callback_query(update: Any, context: Any) -> None:
             await context.bot.send_message(chat_id=chat_id, text="Active session set.")
         return
 
-    if data.startswith("approval_select:"):
-        policy = data.split(":", 1)[1]
-        if policy not in ("untrusted", "on-request", "on-failure", "never"):
-            await context.bot.send_message(chat_id=chat_id, text="Invalid policy.")
+    if data == "approval_mode_cancel":
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+
+        state = runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        current = state.approval_mode
+        if current == "always":
+            # Backward compat: "always" mode was removed; treat as on-request.
+            current = "on-request"
+        modes = [
+            ("on-request", "🤔 Ask on request"),
+            ("yolo", "☠️ YOLO"),
+        ]
+        buttons = [
+            InlineKeyboardButton(
+                f"{'✅ ' if m == current else ''}{label}",
+                callback_data=f"approval_mode_select:{m}",
+            )
+            for m, label in modes
+        ]
+        kb = InlineKeyboardMarkup([[b] for b in buttons])
+        try:
+            await q.edit_message_text(text="Choose approval mode:", reply_markup=kb)
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text="Choose approval mode:", reply_markup=kb)
+        return
+
+    if data.startswith("approval_mode_select:"):
+        mode = data.split(":", 1)[1]
+        # Backward compat: old inline UIs may still contain "always".
+        if mode == "always":
+            mode = "on-request"
+        if mode not in ("on-request", "yolo"):
+            await context.bot.send_message(chat_id=chat_id, text="Invalid mode.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
             return
         runtime.store.ensure_chat_state(
             chat_id=chat_id,
@@ -149,12 +195,59 @@ async def on_callback_query(update: Any, context: Any) -> None:
             default_approval_policy=runtime.cfg.codex.approval_policy,
             default_model=runtime.cfg.codex.model,
         )
-        runtime.store.update_chat_state(chat_id, approval_policy=policy)
+
+        if mode == "yolo":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm YOLO", callback_data="approval_mode_confirm:yolo"),
+                        InlineKeyboardButton("Cancel", callback_data="approval_mode_cancel"),
+                    ]
+                ]
+            )
+            try:
+                await q.edit_message_text(
+                    text="Confirm YOLO? This disables approvals.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Confirm YOLO? This disables approvals.",
+                    reply_markup=kb,
+                )
+            return
+
+        runtime.store.update_chat_state(chat_id, approval_mode=mode)
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await context.bot.send_message(chat_id=chat_id, text=f"Approval policy set to: {policy}")
+        await context.bot.send_message(chat_id=chat_id, text=f"Approval mode set to: {mode}")
+        return
+
+    if data.startswith("approval_mode_confirm:"):
+        mode = data.split(":", 1)[1]
+        if mode != "yolo":
+            await context.bot.send_message(chat_id=chat_id, text="Invalid confirmation.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+        runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        runtime.store.update_chat_state(chat_id=chat_id, approval_mode="yolo")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text="Approval mode set to: yolo")
         return
 
     if data.startswith("model_select:"):
@@ -255,152 +348,65 @@ async def on_callback_query(update: Any, context: Any) -> None:
     if not isinstance(pending, dict):
         await context.bot.send_message(chat_id=chat_id, text="Pending action mismatch.")
         return
-    kind = pending.get("kind")
-
-    if kind == "exec_approval":
-        run = runtime.active_runs.get(chat_id)
-        if run is None:
-            await context.bot.send_message(chat_id=chat_id, text="Run handle missing (restart?).")
-            runtime.store.clear_active_run(chat_id=chat_id)
-            return
-
-        if action == "reject":
-            decision = "denied"
-        else:
-            decision = "approved"
-
-        if action == "approve_similar":
-            session_id = pending.get("session_id")
-            prefix = pending.get("prefix")
-            if isinstance(session_id, str) and isinstance(prefix, str) and session_id:
-                state = runtime.store.get_chat_state(chat_id)
-                runtime.store.add_trusted_prefix(
-                    machine_name=state.machine_name if state else runtime.cfg.machines.default,
-                    session_id=session_id,
-                    prefix=prefix,
-                )
-
-        cmd = pending.get("command")
-        call_id = pending.get("call_id")
-        cmd_s = cmd if isinstance(cmd, str) else ""
-        _log(
-            "approval_decision "
-            f"kind=exec_approval action={action} decision={decision} run_id={run_id} "
-            f"call_id={call_id!r} cmd_tag={_cmd_tag(cmd_s) if cmd_s else '-'} cmd={_cmd_preview(cmd_s)}"
-        )
-        try:
-            await run.send_exec_approval(
-                decision=decision,
-                call_id=call_id if isinstance(call_id, str) else None,
-            )
-        except Exception as exc:
-            await context.bot.send_message(chat_id=chat_id, text=f"Failed to send approval: {exc}")
-            return
-
-        # Only clear pending state once we've successfully sent the decision.
-        runtime.store.set_active_run(chat_id=chat_id, run_id=run_id, status="running", pending_action=None)
-
-        # Remove keyboard to reduce double-clicks.
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        await context.bot.send_message(chat_id=chat_id, text=f"Decision sent: {decision}.")
+    ptype = pending.get("type")
+    if ptype != "approval_request":
+        await context.bot.send_message(chat_id=chat_id, text="Pending action mismatch.")
         return
 
-    if kind == "proxy_exec":
-        # Proxy approvals are tgcodex-enforced when Codex exec-mode bypasses approvals. We run the
-        # approved command ourselves and feed the output back into the session as the next message.
-        cmd = pending.get("command")
-        cwd = pending.get("cwd")
-        if not isinstance(cmd, str) or not cmd.strip():
-            await context.bot.send_message(chat_id=chat_id, text="Pending action missing command.")
-            runtime.store.clear_active_run(chat_id=chat_id)
-            return
-        if not isinstance(cwd, str) or not cwd.strip():
-            state = runtime.store.get_chat_state(chat_id)
-            cwd = state.workdir if state else None
-
-        if action == "reject":
-            _log(
-                "approval_decision "
-                f"kind=proxy_exec action=reject run_id={run_id} "
-                f"cmd_tag={_cmd_tag(cmd)} cmd={_cmd_preview(cmd)}"
-            )
-            runtime.store.clear_active_run(chat_id=chat_id)
-            try:
-                await q.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await context.bot.send_message(chat_id=chat_id, text="Rejected.")
-            return
-
-        # Approve (once/similar behave the same in Always-ask mode).
-        state = runtime.store.ensure_chat_state(
-            chat_id=chat_id,
-            default_machine=runtime.cfg.machines.default,
-            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
-            default_approval_policy=runtime.cfg.codex.approval_policy,
-            default_model=runtime.cfg.codex.model,
-        )
-        machine_rt = runtime.machines[state.machine_name]
-
-        # Clear pending approval now to avoid deadlocks if execution or follow-up fails.
+    run = runtime.active_runs.get(chat_id)
+    if run is None:
+        await context.bot.send_message(chat_id=chat_id, text="Run handle missing (restart?).")
         runtime.store.clear_active_run(chat_id=chat_id)
-
-        try:
-            _log(
-                "proxy_exec_start "
-                f"run_id={run_id} machine={state.machine_name} "
-                f"cmd_tag={_cmd_tag(cmd)} cmd={_cmd_preview(cmd)}"
-            )
-            res = await machine_rt.machine.exec_capture(["bash", "-lc", cmd], cwd=cwd)
-        except Exception as exc:
-            await context.bot.send_message(chat_id=chat_id, text=f"Command failed to start: {exc}")
-            return
-        _log(
-            "proxy_exec_end "
-            f"run_id={run_id} exit_code={res.exit_code} "
-            f"cmd_tag={_cmd_tag(cmd)}"
-        )
-
-        # Keep chat clean: don't spam stdout/stderr for proxy-approved commands.
-        # If something goes wrong, send only the exit code; detailed output is still fed back
-        # into Codex below so it can continue the task.
-        if res.exit_code != 0:
-            await context.bot.send_message(chat_id=chat_id, text=f"Command failed (exit code: {res.exit_code}).")
-
-        # Remove keyboard to reduce double-clicks.
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        # Feed the output back into Codex so it can continue the original task.
-        from tgcodex.bot.commands import on_text_message
-
-        class _SyntheticMsg:
-            def __init__(self, text: str) -> None:
-                self.text = text
-
-        class _SyntheticUpdate:
-            effective_chat = update.effective_chat
-            effective_user = update.effective_user
-            # Cap tool output fed back into Codex to avoid blowing up the prompt/context window.
-            _max_feed = max(int(getattr(runtime.cfg.output, "max_tool_output_chars", 0) or 0), 20000)
-            _stdout = _truncate_text(res.stdout, max_chars=_max_feed)
-            _stderr = _truncate_text(res.stderr, max_chars=_max_feed)
-            message = _SyntheticMsg(
-                "[Tool output]\n"
-                f"Command: {cmd}\n"
-                f"Exit code: {res.exit_code}\n"
-                f"STDOUT:\n{_stdout}\n"
-                f"STDERR:\n{_stderr}\n"
-                "Continue."
-            )
-
-        await on_text_message(_SyntheticUpdate(), context)
         return
 
-    await context.bot.send_message(chat_id=chat_id, text="Pending action mismatch.")
+    request_kind = pending.get("request_kind")
+    rpc_id = pending.get("rpc_id")
+    if request_kind not in ("commandExecution", "fileChange"):
+        await context.bot.send_message(chat_id=chat_id, text="Pending approval missing request kind.")
+        return
+    if not isinstance(rpc_id, (int, str)):
+        await context.bot.send_message(chat_id=chat_id, text="Pending approval missing rpc id.")
+        return
+
+    if action == "reject":
+        decision = "decline"
+        execpolicy_amendment = None
+    elif action == "approve_similar":
+        proposed = pending.get("proposed_execpolicy_amendment")
+        if request_kind == "commandExecution" and isinstance(proposed, list) and all(isinstance(x, str) for x in proposed):
+            decision = "acceptWithExecpolicyAmendment"
+            execpolicy_amendment = proposed
+        else:
+            decision = "acceptForSession"
+            execpolicy_amendment = None
+    else:
+        decision = "accept"
+        execpolicy_amendment = None
+
+    cmd = pending.get("command")
+    cmd_s = cmd if isinstance(cmd, str) else ""
+    _log(
+        "approval_decision "
+        f"type=approval_request action={action} decision={decision} run_id={run_id} "
+        f"rpc_id={rpc_id!r} cmd_tag={_cmd_tag(cmd_s) if cmd_s else '-'} cmd={_cmd_preview(cmd_s)}"
+    )
+    try:
+        await run.respond_approval(
+            rpc_id=rpc_id,
+            request_kind=request_kind,
+            decision=decision,
+            execpolicy_amendment=execpolicy_amendment,
+        )
+    except Exception as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"Failed to send approval: {exc}")
+        return
+
+    runtime.store.set_active_run(chat_id=chat_id, run_id=run_id, status="running", pending_action=None)
+
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await context.bot.send_message(chat_id=chat_id, text=f"Decision sent: {decision}.")
+    return

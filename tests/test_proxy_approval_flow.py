@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -110,17 +111,23 @@ class _FakeCodex:
         self._run = run
         self.last_settings = None
 
-    async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+    async def start_session(self, *, machine: Any, thread_id: Any, workdir: str, settings: Any) -> Any:
         self.last_settings = settings
         return self._run
+
+    async def send_user_message(self, *, session: Any, prompt: str, settings: Any) -> None:
+        return
 
 
 class _FailingCodex:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+    async def start_session(self, *, machine: Any, thread_id: Any, workdir: str, settings: Any) -> Any:
         raise self._exc
+
+    async def send_user_message(self, *, session: Any, prompt: str, settings: Any) -> None:
+        raise RuntimeError("send_user_message should not be called")
 
 
 class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
@@ -165,11 +172,14 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 self._stall = _RunStall()
                 self._ok = _RunOK()
 
-            async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+            async def start_session(self, *, machine: Any, thread_id: Any, workdir: str, settings: Any) -> Any:
                 self.calls.append(str(getattr(machine, "type", "unknown")))
                 if getattr(machine, "type", None) == "ssh":
                     return self._stall
                 return self._ok
+
+            async def send_user_message(self, *, session: Any, prompt: str, settings: Any) -> None:
+                return
 
         class _FakeSshMachine:
             name = "sshbox"
@@ -292,11 +302,14 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 self.calls: list[str] = []
                 self._run = _RunOK()
 
-            async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+            async def start_session(self, *, machine: Any, thread_id: Any, workdir: str, settings: Any) -> Any:
                 self.calls.append(str(getattr(machine, "type", "unknown")))
                 if getattr(machine, "type", None) == "ssh":
                     raise TimeoutError("ssh connect timeout")
                 return self._run
+
+            async def send_user_message(self, *, session: Any, prompt: str, settings: Any) -> None:
+                return
 
         with tempfile.TemporaryDirectory() as td:
             db_path = os.path.join(td, "state.sqlite3")
@@ -467,7 +480,12 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(active)
                     assert active is not None
                     self.assertEqual(active.status, "waiting_approval")
-                    self.assertIn("exec_approval", active.pending_action_json or "")
+                    pending = json.loads(active.pending_action_json or "{}")
+                    self.assertEqual(pending.get("type"), "approval_request")
+                    # Fake runs emit ExecApprovalRequest directly (no app-server raw method),
+                    # so the bot defaults this to a command approval request.
+                    self.assertEqual(pending.get("request_kind"), "commandExecution")
+                    self.assertEqual(pending.get("command"), "mkdir -p foo")
                     self.assertFalse(run.cancel_called)
                     self.assertEqual(runtime.codex.last_settings.sandbox, "workspace-write")
                 finally:

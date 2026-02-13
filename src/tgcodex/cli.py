@@ -229,7 +229,7 @@ def setup_cmd(
             "args": [],
             "model": None,
             "sandbox": "workspace-write",
-            "approval_policy": "untrusted",
+            "approval_policy": "on-request",
             "skip_git_repo_check": True,
         },
         "output": {

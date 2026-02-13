@@ -13,12 +13,10 @@ from tgcodex.bot.output_stream import (
     OutputTuning,
     typing_loop,
 )
-from tgcodex.codex.adapter import RunSettings
-from tgcodex.codex.approvals import should_prompt_for_approval
+from tgcodex.codex.app_server_backend import AppServerSettings
 from tgcodex.codex.events import (
     AgentMessage,
     AgentMessageDelta,
-    AgentReasoningDelta,
     ErrorEvent,
     ExecApprovalRequest,
     ExecCommandEnd,
@@ -184,8 +182,7 @@ async def on_menu(update: Any, context: Any) -> None:
             "/resume",
             "/machine <name>",
             "/cd <path>",
-            "/approval <untrusted|on-request|on-failure|never>",
-            "/reasoning",
+            "/approval [on-request|yolo]",
             "/plan",
             "/compact",
             "/model [slug] [effort]",
@@ -412,41 +409,11 @@ async def on_set_approval(update: Any, context: Any) -> None:
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
-    state = runtime.store.ensure_chat_state(
-        chat_id=chat_id,
-        default_machine=runtime.cfg.machines.default,
-        default_workdir=_default_workdir(runtime, runtime.cfg.machines.default),
-        default_approval_policy=runtime.cfg.codex.approval_policy,
-        default_model=runtime.cfg.codex.model,
-    )
-    current = state.approval_policy
-    policies = [
-        ("untrusted", "Always ask"),
-        ("on-request", "Ask when requested"),
-        ("on-failure", "Ask on failure"),
-        ("never", "Never ask"),
-    ]
-    buttons = [
-        InlineKeyboardButton(
-            f"{'✅ ' if p == current else ''}{label}",
-            callback_data=f"approval_select:{p}",
-        )
-        for p, label in policies
-    ]
-    kb = InlineKeyboardMarkup([[b] for b in buttons])
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="Choose approval policy:",
-        reply_markup=kb,
-    )
-
-
-async def on_reasoning(update: Any, context: Any) -> None:
-    runtime = _rt(context)
-    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
-        await _deny(update, context)
+    active = runtime.store.get_active_run(chat_id)
+    if active and active.status == "waiting_approval":
+        await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
         return
-    chat_id = update.effective_chat.id
+
     state = runtime.store.ensure_chat_state(
         chat_id=chat_id,
         default_machine=runtime.cfg.machines.default,
@@ -454,9 +421,57 @@ async def on_reasoning(update: Any, context: Any) -> None:
         default_approval_policy=runtime.cfg.codex.approval_policy,
         default_model=runtime.cfg.codex.model,
     )
-    new_val = not state.show_reasoning
-    runtime.store.update_chat_state(chat_id, show_reasoning=1 if new_val else 0)
-    await context.bot.send_message(chat_id=chat_id, text=f"show_reasoning={new_val}")
+
+    # CLI-style usage: /approval <mode>
+    # Supported: on-request | yolo (plus legacy aliases for convenience).
+    msg_text = getattr(getattr(update, "message", None), "text", "") or ""
+    args = msg_text.split(maxsplit=1)
+    if len(args) >= 2:
+        raw = args[1].strip().lower()
+        mode: str | None = None
+        if raw in ("on-request", "onrequest", "on_request", "always", "untrusted", "on-failure", "onfailure", "on_failure"):
+            mode = "on-request"
+        elif raw in ("yolo", "never"):
+            mode = "yolo"
+
+        if mode is None:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Usage: /approval [on-request|yolo]",
+            )
+            return
+
+        if mode == "yolo":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm YOLO", callback_data="approval_mode_confirm:yolo"),
+                        InlineKeyboardButton("Cancel", callback_data="approval_mode_cancel"),
+                    ]
+                ]
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Confirm YOLO? This disables approvals.",
+                reply_markup=kb,
+            )
+            return
+
+        runtime.store.update_chat_state(chat_id, approval_mode=mode)
+        await context.bot.send_message(chat_id=chat_id, text=f"Approval mode set to: {mode}")
+        return
+
+    current = state.approval_mode
+    modes = [
+        ("on-request", "🤔 Ask on request"),
+        ("yolo", "☠️ YOLO"),
+    ]
+    buttons = []
+    for m, label in modes:
+        prefix = "✅ " if m == current else ""
+        buttons.append(InlineKeyboardButton(prefix + label, callback_data=f"approval_mode_select:{m}"))
+    kb = InlineKeyboardMarkup([[b] for b in buttons])
+    await context.bot.send_message(chat_id=chat_id, text="Choose approval mode:", reply_markup=kb)
 
 
 async def on_model(update: Any, context: Any) -> None:
@@ -631,15 +646,13 @@ async def on_compact(update: Any, context: Any) -> None:
     machine_rt = runtime.machines[state.machine_name]
     md = machine_rt.defn
     codex_bin = md.codex_bin or runtime.cfg.codex.bin
-    approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-    settings = RunSettings(
+    settings = AppServerSettings(
         codex_bin=codex_bin,
         codex_args=runtime.cfg.codex.args,
         model=state.model or runtime.cfg.codex.model,
         thinking_level=state.thinking_level,
         sandbox=runtime.cfg.codex.sandbox,
-        approval_policy=approval_policy,
-        skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+        approval_mode=state.approval_mode,
     )
 
     await context.bot.send_message(chat_id=chat_id, text="Compacting session…")
@@ -676,15 +689,16 @@ async def on_compact(update: Any, context: Any) -> None:
             "- Next steps\n"
         )
 
-        summary_run = await runtime.codex.start_run(
+        summary_run = await runtime.codex.start_session(
             machine=machine_rt.machine,
-            session_id=state.active_session_id,
             workdir=state.workdir,
-            prompt=summary_prompt,
             settings=settings,
+            thread_id=state.active_session_id,
         )
         runtime.active_runs[chat_id] = summary_run
         runtime.store.set_active_run(chat_id=chat_id, run_id=summary_run.run_id, status="running", pending_action=None)
+
+        await runtime.codex.send_user_message(session=summary_run, prompt=summary_prompt, settings=settings)
 
         summary_parts: list[str] = []
         async for ev in summary_run.events():
@@ -735,15 +749,16 @@ async def on_compact(update: Any, context: Any) -> None:
             "Reply with exactly: Compaction complete.\n"
         )
 
-        init_run = await runtime.codex.start_run(
+        init_run = await runtime.codex.start_session(
             machine=machine_rt.machine,
-            session_id=None,
             workdir=state.workdir,
-            prompt=init_prompt,
             settings=settings,
+            thread_id=None,
         )
         runtime.active_runs[chat_id] = init_run
         runtime.store.set_active_run(chat_id=chat_id, run_id=init_run.run_id, status="running", pending_action=None)
+
+        await runtime.codex.send_user_message(session=init_run, prompt=init_prompt, settings=settings)
 
         async for ev in init_run.events():
             if isinstance(ev, ThreadStarted):
@@ -887,7 +902,13 @@ async def on_text_message(update: Any, context: Any) -> None:
         )
         default_title = state.session_title or derive_session_title(msg, max_len=60)
         active = runtime.store.get_active_run(chat_id)
-        if active and active.status in ("running", "waiting_approval"):
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Approval pending — use the inline buttons (or /exit to cancel).",
+            )
+            return
+        if active and active.status == "running":
             await context.bot.send_message(chat_id=chat_id, text="Run in progress. Use /exit to cancel.")
             return
 
@@ -915,25 +936,25 @@ async def on_text_message(update: Any, context: Any) -> None:
         machine_rt = runtime.machines[state.machine_name]
         md = machine_rt.defn
         codex_bin = md.codex_bin or runtime.cfg.codex.bin
-        approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-        settings = RunSettings(
+        settings = AppServerSettings(
             codex_bin=codex_bin,
             codex_args=runtime.cfg.codex.args,
             model=state.model or runtime.cfg.codex.model,
             thinking_level=state.thinking_level,
             sandbox=runtime.cfg.codex.sandbox,
-            approval_policy=approval_policy,
-            skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+            approval_mode=state.approval_mode,
         )
 
         try:
-            run = await runtime.codex.start_run(
+            run = await runtime.codex.start_session(
                 machine=machine_rt.machine,
-                session_id=state.active_session_id,
                 workdir=state.workdir,
-                prompt=prompt,
                 settings=settings,
+                thread_id=state.active_session_id,
             )
+            runtime.active_runs[chat_id] = run
+            runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
+            await runtime.codex.send_user_message(session=run, prompt=prompt, settings=settings)
         except Exception as exc:
             # If the active machine is SSH and is unreachable, automatically fall back to a local
             # machine and start a fresh session so the user isn't stuck with a "dead" chat.
@@ -962,22 +983,31 @@ async def on_text_message(update: Any, context: Any) -> None:
 
                     md = machine_rt.defn
                     codex_bin = md.codex_bin or runtime.cfg.codex.bin
-                    approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-                    settings = RunSettings(
+                    settings = AppServerSettings(
                         codex_bin=codex_bin,
                         codex_args=runtime.cfg.codex.args,
                         model=state.model or runtime.cfg.codex.model,
                         thinking_level=state.thinking_level,
                         sandbox=runtime.cfg.codex.sandbox,
-                        approval_policy=approval_policy,
-                        skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+                        approval_mode=state.approval_mode,
                     )
 
                     try:
-                        run = await runtime.codex.start_run(
+                        run = await runtime.codex.start_session(
                             machine=machine_rt.machine,
-                            session_id=None,
                             workdir=state.workdir,
+                            settings=settings,
+                            thread_id=None,
+                        )
+                        runtime.active_runs[chat_id] = run
+                        runtime.store.set_active_run(
+                            chat_id=chat_id,
+                            run_id=run.run_id,
+                            status="running",
+                            pending_action=None,
+                        )
+                        await runtime.codex.send_user_message(
+                            session=run,
                             prompt=prompt,
                             settings=settings,
                         )
@@ -999,8 +1029,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                     text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
                 )
                 return
-        runtime.active_runs[chat_id] = run
-        runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
+        # runtime.active_runs + active_run are set immediately after start_session succeeds.
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(
@@ -1100,25 +1129,30 @@ async def on_text_message(update: Any, context: Any) -> None:
 
                 md = machine_rt.defn
                 codex_bin = md.codex_bin or runtime.cfg.codex.bin
-                approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-                settings = RunSettings(
+                settings = AppServerSettings(
                     codex_bin=codex_bin,
                     codex_args=runtime.cfg.codex.args,
                     model=state.model or runtime.cfg.codex.model,
                     thinking_level=state.thinking_level,
                     sandbox=runtime.cfg.codex.sandbox,
-                    approval_policy=approval_policy,
-                    skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+                    approval_mode=state.approval_mode,
                 )
 
                 try:
-                    run = await runtime.codex.start_run(
+                    run = await runtime.codex.start_session(
                         machine=machine_rt.machine,
-                        session_id=None,
                         workdir=state.workdir,
-                        prompt=prompt,
                         settings=settings,
+                        thread_id=None,
                     )
+                    runtime.active_runs[chat_id] = run
+                    runtime.store.set_active_run(
+                        chat_id=chat_id,
+                        run_id=run.run_id,
+                        status="running",
+                        pending_action=None,
+                    )
+                    await runtime.codex.send_user_message(session=run, prompt=prompt, settings=settings)
                 except Exception as exc2:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -1157,13 +1191,6 @@ async def on_text_message(update: Any, context: Any) -> None:
                     await writer.flush()
                 continue
 
-            if isinstance(ev, AgentReasoningDelta) and state.show_reasoning:
-                had_output = True
-                writer.append(ev.text)
-                if writer.needs_flush():
-                    await writer.flush()
-                continue
-
             if isinstance(ev, ToolStarted):
                 if runtime.cfg.output.show_tool_output:
                     writer.append(f"\n$ {ev.command}\n")
@@ -1187,50 +1214,76 @@ async def on_text_message(update: Any, context: Any) -> None:
 
             if isinstance(ev, ExecApprovalRequest):
                 await writer.flush(force=True)
+                raw = ev.raw if isinstance(ev.raw, dict) else {}
+                raw_method = raw.get("method")
+                raw_id = raw.get("id")
+                raw_params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+
+                # Internal ExecApprovalRequest events represent a paused approval gate. When the
+                # raw app-server method isn't available (e.g. in unit tests), default to the most
+                # common case: a command execution approval request.
+                request_kind = "commandExecution"
+                if raw_method == "item/commandExecution/requestApproval":
+                    request_kind = "commandExecution"
+                elif raw_method == "item/fileChange/requestApproval":
+                    request_kind = "fileChange"
+
+                rpc_id: Any = raw_id
+                if rpc_id is None:
+                    # Backward-compatible fallback: older code paths used call_id.
+                    rpc_id = ev.call_id
+
+                cmd = raw_params.get("command")
+                cwd = raw_params.get("cwd")
+                reason = raw_params.get("reason")
+                item_id = raw_params.get("itemId")
+                turn_id = raw_params.get("turnId")
+                thread_id = raw_params.get("threadId")
+                proposed = raw_params.get("proposedExecpolicyAmendment")
+
+                cmd_s = cmd if isinstance(cmd, str) else ev.command
+                cwd_s = cwd if isinstance(cwd, str) else ev.cwd
+                reason_s = reason if isinstance(reason, str) else ev.reason
+
                 _log(
                     "exec_approval_request "
                     f"run_id={run.run_id} call_id={ev.call_id!r} outer_id={ev.outer_id!r} "
-                    f"cmd_tag={_cmd_tag(ev.command)} cmd={_cmd_preview(ev.command)} "
-                    f"cwd={ev.cwd!r} policy={settings.approval_policy}"
+                    f"cmd_tag={_cmd_tag(cmd_s)} cmd={_cmd_preview(cmd_s)} "
+                    f"cwd={cwd_s!r} mode={settings.approval_mode} kind={request_kind}"
                 )
-                session_id = run.thread_id or state.active_session_id
-                trusted = []
-                if session_id:
-                    trusted = runtime.store.list_trusted_prefixes(
-                        machine_name=state.machine_name, session_id=session_id
-                    )
-                needs_prompt, prefix = should_prompt_for_approval(
-                    approval_policy=settings.approval_policy,
-                    command=ev.command,
-                    trusted_prefixes=trusted,
-                    prefix_tokens=runtime.cfg.approvals.prefix_tokens,
-                )
-                if not needs_prompt:
-                    _log(
-                        "exec_approval_auto "
-                        f"run_id={run.run_id} call_id={ev.call_id!r} "
-                        f"cmd_tag={_cmd_tag(ev.command)}"
-                    )
-                    await run.send_exec_approval(decision="approved", call_id=ev.call_id)
+
+                if settings.approval_mode == "yolo":
+                    # Even in YOLO, Codex may still request approval in edge cases. Auto-accept.
+                    try:
+                        await run.respond_approval(
+                            rpc_id=rpc_id,
+                            request_kind=request_kind,
+                            decision="accept",
+                        )
+                    except Exception as exc:
+                        await context.bot.send_message(chat_id=chat_id, text=f"Failed to auto-approve: {exc}")
                     continue
 
                 from tgcodex.bot.formatting import fmt_approval_prompt
 
                 pending = {
-                    "kind": "exec_approval",
-                    "command": ev.command,
-                    "cwd": ev.cwd,
-                    "reason": ev.reason,
-                    "call_id": ev.call_id,
-                    "outer_id": ev.outer_id,
-                    "prefix": prefix,
-                    "session_id": session_id,
+                    "v": 1,
+                    "type": "approval_request",
+                    "request_kind": request_kind,
+                    "rpc_id": rpc_id,
+                    "thread_id": thread_id if isinstance(thread_id, str) else (run.thread_id or state.active_session_id),
+                    "turn_id": turn_id if isinstance(turn_id, str) else None,
+                    "item_id": item_id if isinstance(item_id, str) else None,
+                    "command": cmd_s,
+                    "cwd": cwd_s,
+                    "reason": reason_s,
+                    "proposed_execpolicy_amendment": proposed if isinstance(proposed, list) else None,
                 }
                 _log(
                     "approval_prompt "
-                    f"kind=exec_approval run_id={run.run_id} call_id={ev.call_id!r} "
-                    f"cmd_tag={_cmd_tag(ev.command)} cmd={_cmd_preview(ev.command)} "
-                    f"cwd={ev.cwd!r} prefix={prefix!r}"
+                    f"type=approval_request run_id={run.run_id} rpc_id={rpc_id!r} "
+                    f"cmd_tag={_cmd_tag(cmd_s)} cmd={_cmd_preview(cmd_s)} "
+                    f"cwd={cwd_s!r} kind={request_kind}"
                 )
                 runtime.store.set_active_run(
                     chat_id=chat_id,
@@ -1242,41 +1295,26 @@ async def on_text_message(update: Any, context: Any) -> None:
                 try:
                     from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
 
-                    if settings.approval_policy == "untrusted":
-                        # "Always ask" mode: don't offer prefix trust shortcuts.
-                        kb = InlineKeyboardMarkup(
+                    kb = InlineKeyboardMarkup(
+                        [
                             [
-                                [
-                                    InlineKeyboardButton(
-                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                    ),
-                                    InlineKeyboardButton(
-                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                    ),
-                                ]
+                                InlineKeyboardButton(
+                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
+                                ),
+                                InlineKeyboardButton(
+                                    "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
+                                ),
+                                InlineKeyboardButton(
+                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
+                                ),
                             ]
-                        )
-                    else:
-                        kb = InlineKeyboardMarkup(
-                            [
-                                [
-                                    InlineKeyboardButton(
-                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                    ),
-                                    InlineKeyboardButton(
-                                        "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
-                                    ),
-                                    InlineKeyboardButton(
-                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                    ),
-                                ]
-                            ]
-                        )
+                        ]
+                    )
                 except Exception:
                     kb = None
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=fmt_approval_prompt(command=ev.command, cwd=ev.cwd, reason=ev.reason),
+                    text=fmt_approval_prompt(command=cmd_s, cwd=cwd_s, reason=reason_s),
                     reply_markup=kb,
                 )
                 continue

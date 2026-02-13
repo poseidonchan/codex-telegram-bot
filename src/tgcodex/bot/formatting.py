@@ -21,13 +21,12 @@ def fmt_status(state: ChatState, run: Optional[ActiveRun]) -> str:
     parts.append(f"Workdir: {state.workdir}")
     parts.append(f"Session title: {state.session_title or 'None'}")
     parts.append(f"Session ID: {state.active_session_id or 'None'}")
-    parts.append(f"Approval: {state.approval_policy}")
+    parts.append(f"Approval mode: {state.approval_mode}")
     if state.model:
         model_str = state.model
         if state.thinking_level:
             model_str += f" ({state.thinking_level})"
         parts.append(f"Model: {model_str}")
-    parts.append(f"Reasoning: {'on' if state.show_reasoning else 'off'}")
     parts.append(f"Plan mode: {'on' if state.plan_mode else 'off'}")
 
     # Context: best-effort, from token_count telemetry (if available).

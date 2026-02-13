@@ -89,7 +89,7 @@ codex:
   args: []
   model: null
   sandbox: workspace-write
-  approval_policy: untrusted
+  approval_policy: on-request
   skip_git_repo_check: true
 
 machines:
@@ -105,6 +105,7 @@ Notes:
 
 - `telegram.allowed_user_ids` is your security boundary: if the user ID is not listed, the bot refuses requests.
 - `allowed_roots` restricts `/cd` and path resolution to an allowlist.
+- `codex.approval_policy` sets the default approval behavior for new chats (recommended: `on-request`). You can change it per chat with `/approval`.
 - For SSH machines you can override the remote `codex` path with `machines.defs.<name>.codex_bin`.
 
 ## Running And Operations
@@ -156,9 +157,8 @@ Environment:
 
 Run behavior:
 
-- `/approval <untrusted|on-request|on-failure|never>`: update approval policy
+- `/approval [on-request|yolo]`: update approval mode (legacy aliases like `untrusted`, `always`, `never` still work)
 - `/plan`: toggle “plan mode”
-- `/reasoning`: toggle reasoning output (if enabled)
 - `/compact`: compact the active session and continue in a new one
 - `/model [slug] [effort]`: pick a model (and thinking level if supported)
 - `/skills`: list available Codex skills (on the active machine)
@@ -173,15 +173,13 @@ Tip:
 Execution approvals are shown as inline buttons:
 
 - Accept once
-- Accept similar (stores a trusted prefix for this session; not offered in `untrusted`)
+- Accept similar (stores a trusted prefix for this session)
 - Reject
 
-Approval policies:
+Approval modes:
 
-- `untrusted`: ask for approval for any command that isn’t in Codex’s “trusted” set (tgcodex also forces the current workdir’s project trust_level to `untrusted` to avoid accidental bypass from `~/.codex/config.toml`)
-- `on-request`: the model decides when to ask for approval
-- `on-failure`: ask only when a command fails and Codex wants to retry with less sandboxing
-- `never`: never ask
+- `on-request`: Codex requests approval when needed; the bot shows inline Approve/Reject buttons and waits.
+- `yolo`: auto-accept approvals (no prompts). Sandbox stays enabled.
 
 ## Machines (Local And SSH)
 

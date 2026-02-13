@@ -101,10 +101,13 @@ class _BlockingStartCodex:
         self._start_gate = start_gate
         self._finish_gate = finish_gate
 
-    async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+    async def start_session(self, *, machine: Any, thread_id: Any, workdir: str, settings: Any) -> Any:
         self.calls += 1
         await self._start_gate.wait()
         return _FakeRun(run_id=f"run-{self.calls}", finish=self._finish_gate)
+
+    async def send_user_message(self, *, session: Any, prompt: str, settings: Any) -> None:
+        return
 
 
 class TestBotNonBlocking(unittest.IsolatedAsyncioTestCase):

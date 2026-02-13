@@ -10,4 +10,5 @@ __pycache__/
 tgcodex.sqlite3
 tgcodex.sqlite3-*
 .tgcodex-bot/
+.worktrees/
 config.yaml

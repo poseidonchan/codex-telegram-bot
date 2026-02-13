@@ -15,6 +15,7 @@ def migrate(conn: sqlite3.Connection) -> None:
           active_session_id TEXT,
           session_title TEXT,
           approval_policy TEXT NOT NULL,
+          approval_mode TEXT,
           model TEXT,
           thinking_level TEXT,
           show_reasoning INTEGER NOT NULL DEFAULT 0,
@@ -37,6 +38,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     )
     # Migration: add token columns to existing databases that pre-date this schema.
     for col, typ in [
+        ("approval_mode", "TEXT"),
         ("last_input_tokens", "INTEGER"),
         ("last_output_tokens", "INTEGER"),
         ("last_cached_tokens", "INTEGER"),
@@ -54,6 +56,35 @@ def migrate(conn: sqlite3.Connection) -> None:
             cur.execute(f"ALTER TABLE chat_state ADD COLUMN {col} {typ}")
         except Exception:
             pass  # Column already exists
+
+    # Best-effort backfill: older DBs won't have approval_mode populated.
+    # Map legacy Codex approval policies to the closest user-facing mode:
+    # - never -> yolo
+    # - everything else -> on-request
+    try:
+        cur.execute(
+            """
+            UPDATE chat_state
+            SET approval_mode = CASE approval_policy
+              WHEN 'never' THEN 'yolo'
+              ELSE 'on-request'
+            END
+            WHERE approval_mode IS NULL OR approval_mode = ''
+            """
+        )
+    except Exception:
+        pass
+    # Backward compat: earlier builds used approval_mode='always'; coerce to on-request.
+    try:
+        cur.execute(
+            """
+            UPDATE chat_state
+            SET approval_mode = 'on-request'
+            WHERE approval_mode = 'always'
+            """
+        )
+    except Exception:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS session_index (

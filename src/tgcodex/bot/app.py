@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tgcodex.config import Config
-from tgcodex.codex.adapter import CodexCLIAdapter
+from tgcodex.codex.app_server_backend import AppServerBackend
 from tgcodex.machines.base import Machine
 from tgcodex.machines.local import LocalMachine
 from tgcodex.machines.ssh import SSHMachine
@@ -33,7 +33,7 @@ class BotRuntime:
     cfg: Config
     store: Store
     machines: dict[str, MachineRuntime]
-    codex: CodexCLIAdapter
+    codex: AppServerBackend
     active_runs: dict[int, Any]  # chat_id -> CodexRun (in-memory)
     chat_locks: dict[int, Any]  # chat_id -> asyncio.Lock
 
@@ -56,8 +56,7 @@ def default_bot_command_specs() -> tuple[tuple[str, str], ...]:
         ("resume", "Resume a past session"),
         ("machine", "Switch machine"),
         ("cd", "Change working directory"),
-        ("approval", "Set approval policy"),
-        ("reasoning", "Toggle reasoning output"),
+        ("approval", "Set approval mode"),
         ("plan", "Toggle plan mode"),
         ("compact", "Compact current session"),
         ("model", "Pick model (and thinking level)"),
@@ -125,7 +124,7 @@ def build_application(cfg: Config) -> Any:
         cfg=cfg,
         store=store,
         machines=build_machines(cfg),
-        codex=CodexCLIAdapter(),
+        codex=AppServerBackend(),
         active_runs={},
         chat_locks={},
     )
@@ -172,7 +171,6 @@ def build_application(cfg: Config) -> Any:
         on_new,
         on_plan,
         on_rename,
-        on_reasoning,
         on_resume,
         on_skills,
         on_start,
@@ -193,7 +191,6 @@ def build_application(cfg: Config) -> Any:
     app.add_handler(CommandHandler("machine", on_machine))
     app.add_handler(CommandHandler("cd", on_cd))
     app.add_handler(CommandHandler("approval", on_set_approval))
-    app.add_handler(CommandHandler("reasoning", on_reasoning))
     app.add_handler(CommandHandler("plan", on_plan))
     app.add_handler(CommandHandler("compact", on_compact))
     app.add_handler(CommandHandler("model", on_model))
