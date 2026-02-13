@@ -119,6 +119,25 @@ async def on_start(update: Any, context: Any) -> None:
     )
 
 
+async def on_cbtest(update: Any, context: Any) -> None:
+    """
+    Inline button callback health check.
+
+    If this doesn't work, callback_query updates aren't reaching the bot, so all inline-button
+    UIs (/model, approvals, /resume, etc.) will appear to "do nothing".
+    """
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    runtime = _rt(context)
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+        await _deny(update, context)
+        return
+    chat_id = update.effective_chat.id
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ping", callback_data="cbtest_ping")]])
+    await context.bot.send_message(chat_id=chat_id, text="Callback test: click Ping.", reply_markup=kb)
+
+
 async def on_menu(update: Any, context: Any) -> None:
     runtime = _rt(context)
     if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
@@ -416,6 +435,8 @@ async def on_model(update: Any, context: Any) -> None:
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
+    msg_text = getattr(getattr(update, "message", None), "text", "") or ""
+    args = msg_text.split()
     state = runtime.store.ensure_chat_state(
         chat_id=chat_id,
         default_machine=runtime.cfg.machines.default,
@@ -432,6 +453,45 @@ async def on_model(update: Any, context: Any) -> None:
 
     if not cache.models:
         await context.bot.send_message(chat_id=chat_id, text="No models available.")
+        return
+
+    # CLI-style usage: /model <slug> [effort]
+    # This is a non-inline fallback when callback queries are not working.
+    if len(args) >= 2:
+        slug = args[1].strip()
+        effort_raw = args[2].strip() if len(args) >= 3 else None
+        target = next((m for m in cache.models if m.slug == slug), None)
+        if target is None:
+            await context.bot.send_message(chat_id=chat_id, text=f"Unknown model: {slug}")
+            return
+
+        levels = [lv.effort for lv in (target.supported_reasoning_levels or ())]
+        effort: str | None
+        if effort_raw is None:
+            effort = None
+        elif effort_raw == "default":
+            effort = None
+        elif effort_raw in levels:
+            effort = effort_raw
+        else:
+            hint = ""
+            if levels:
+                hint = "\nValid thinking levels: " + ", ".join(levels)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Invalid thinking level: {effort_raw}{hint}",
+            )
+            return
+
+        runtime.store.update_chat_state(chat_id, model=slug, thinking_level=effort)
+        effort_label = effort or "default"
+        extra = ""
+        if levels and effort_raw is None:
+            extra = "\nTip: set thinking with /model <slug> <effort> (or 'default')."
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Model set to: {slug}, thinking: {effort_label}.{extra}",
+        )
         return
 
     current_model = state.model or ""

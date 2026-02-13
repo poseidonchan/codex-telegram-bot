@@ -11,6 +11,15 @@ from tgcodex.bot.auth import is_allowed_user
 def _rt(context: Any):
     return context.application.bot_data["runtime"]
 
+
+def _log(msg: str) -> None:
+    # Keep logs local to stdout so detached mode captures them in .tgcodex-bot/<config>.log.
+    try:
+        print(f"[tgcodex-bot] {msg}", flush=True)
+    except Exception:
+        pass
+
+
 def _truncate_text(s: str, *, max_chars: int) -> str:
     if max_chars <= 0:
         return ""
@@ -31,12 +40,43 @@ async def on_callback_query(update: Any, context: Any) -> None:
 
     q = update.callback_query
     data = q.data or ""
-    chat_id = update.effective_chat.id
+    chat = getattr(getattr(q, "message", None), "chat", None)
+    chat_id = getattr(chat, "id", None) or getattr(getattr(update, "effective_chat", None), "id", None)
+    if chat_id is None:
+        _log(f"callback missing chat_id data={data!r}")
+        try:
+            await q.answer("No chat for this button.", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    # Provide a visible toast for model selection flows so users can tell the click was received.
+    answer_text: str | None = None
+    if data.startswith("model_select:"):
+        answer_text = "Loading thinking levels..."
+    elif data.startswith("thinking_select:"):
+        answer_text = "Saved."
+    elif data == "cbtest_ping":
+        answer_text = "pong"
 
     try:
-        await q.answer()
+        if answer_text:
+            await q.answer(text=answer_text)
+        else:
+            await q.answer()
     except Exception:
         pass
+
+    # Helps diagnose cases where inline button clicks appear to do nothing.
+    _log(f"callback data={data!r}")
+
+    if data == "cbtest_ping":
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text="Callback OK.")
+        return
 
     if data == "resume_cancel":
         try:
@@ -103,6 +143,7 @@ async def on_callback_query(update: Any, context: Any) -> None:
         try:
             cache = await read_models_cache(machine_rt.machine)
         except Exception as exc:
+            _log(f"model_select read_models_cache failed: {exc!r}")
             await context.bot.send_message(chat_id=chat_id, text=f"Failed to read models cache: {exc}")
             return
         target = next((m for m in cache.models if m.slug == slug), None)
@@ -112,6 +153,7 @@ async def on_callback_query(update: Any, context: Any) -> None:
         # If model has thinking levels, show them; otherwise save immediately.
         levels = target.supported_reasoning_levels or []
         if levels:
+            _log(f"model_select slug={slug!r} levels={[lv.effort for lv in levels]!r}")
             current_effort = state.thinking_level or ""
             buttons = []
             for lv in levels:
@@ -130,6 +172,7 @@ async def on_callback_query(update: Any, context: Any) -> None:
                     reply_markup=kb,
                 )
             except Exception:
+                _log("model_select edit_message_text failed; sending a new message instead")
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"Model: {slug}\nChoose thinking level:",
@@ -150,6 +193,7 @@ async def on_callback_query(update: Any, context: Any) -> None:
             return
         _, slug, effort = parts
         effort = effort if effort != "default" else None
+        _log(f"thinking_select slug={slug!r} effort={effort!r}")
         runtime.store.ensure_chat_state(
             chat_id=chat_id,
             default_machine=runtime.cfg.machines.default,

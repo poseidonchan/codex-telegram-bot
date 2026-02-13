@@ -130,6 +130,25 @@ def build_application(cfg: Config) -> Any:
         chat_locks={},
     )
 
+    async def _on_error(update: object | None, context: Any) -> None:
+        """
+        Central error handler.
+
+        PTB's default error logging can include full request URLs (including the bot token).
+        We log a short sanitized message instead.
+        """
+
+        import re
+
+        err = getattr(context, "error", None)
+        msg = f"{type(err).__name__}: {err}" if err else "unknown error"
+        # Redact bot tokens that might appear in exception strings/URLs.
+        msg = re.sub(r"\\b\\d{6,}:[A-Za-z0-9_-]{30,}\\b", "<BOT_TOKEN>", msg)
+        try:
+            print(f"[tgcodex-bot] error: {msg}", flush=True)
+        except Exception:
+            pass
+
     async def _post_init(app: Application) -> None:
         try:
             await ensure_bot_commands(app.bot)
@@ -143,6 +162,7 @@ def build_application(cfg: Config) -> Any:
     from tgcodex.bot.callbacks import on_callback_query
     from tgcodex.bot.commands import (
         on_cd,
+        on_cbtest,
         on_compact,
         on_exit,
         on_machine,
@@ -163,6 +183,7 @@ def build_application(cfg: Config) -> Any:
     )
 
     app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(CommandHandler("cbtest", on_cbtest))
     app.add_handler(CommandHandler("menu", on_menu))
     app.add_handler(CommandHandler("status", on_status))
     app.add_handler(CommandHandler("botstatus", on_botstatus))
@@ -180,7 +201,12 @@ def build_application(cfg: Config) -> Any:
     app.add_handler(CommandHandler("mcp", on_mcp))
     app.add_handler(CommandHandler("resume", on_resume))
 
-    app.add_handler(CallbackQueryHandler(on_callback_query))
+    # Callback queries are how all inline buttons (approvals, /resume, /model, etc.) work.
+    # Give them higher priority and don't let them block long-running tasks.
+    app.add_handler(CallbackQueryHandler(on_callback_query, block=False), group=-1)
+
+    # Ensure errors are surfaced and don't leak bot token into logs.
+    app.add_error_handler(_on_error, block=False)
 
     # Long-running stream handler: must not block update processing, or callback
     # queries (e.g. /model clicks and approvals) won't be handled with default
@@ -194,4 +220,6 @@ def build_application(cfg: Config) -> Any:
 
 def run_bot(cfg: Config) -> None:
     app = build_application(cfg)
-    app.run_polling(close_loop=False)
+    # Be explicit about callback_query to avoid misconfiguration where inline button clicks
+    # never reach the bot.
+    app.run_polling(allowed_updates=["message", "callback_query"], close_loop=False)
