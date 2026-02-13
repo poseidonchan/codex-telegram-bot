@@ -1,41 +1,47 @@
-# tgcodex-bot
+# codex-telegram-bot (`tgcodex-bot`)
 
-Telegram bot that wraps the `codex` CLI to provide a stateful, private, per-chat Codex session with:
+Run the `codex` CLI from Telegram with per-chat sessions, machine selection (local/SSH), and an approvals UI for command execution.
 
-- Telegram allowlist
-- Per-chat persistent session id (resume across bot restarts)
-- Local + SSH machines
-- Buffered "block streaming" output with typing indicator
-- Inline approval UI for command execution (accept once / accept similar / reject)
+This is designed for private, single-operator use: you allowlist your Telegram user ID(s), then you can run Codex from your phone or desktop Telegram client.
+
+## Features
+
+- Private by default: Telegram user allowlist.
+- Stateful: persists a per-chat Codex session ID (resume across restarts).
+- Multi-machine: run on local or SSH targets.
+- Safer execution UX: inline approvals for exec requests (accept once / accept similar / reject).
+- Telegram-friendly output: buffered streaming with typing indicator.
 
 ## Requirements
 
 - Python >= 3.10
-- A Telegram bot token (via @BotFather)
+- A Telegram bot token (create via @BotFather)
 - The `codex` CLI installed and available on each machine you run on
 - Optional: `asyncssh` for SSH machines (installed by default on non-Windows)
 
-## Quickstart
+## Install
 
-1. Install:
+From the repo (recommended):
 
 ```bash
 python -m pip install -e .
 ```
 
-2. Configure:
+Or directly from GitHub:
 
-- Option A (wizard): run:
+```bash
+python -m pip install "git+https://github.com/poseidonchan/codex-telegram-bot.git"
+```
+
+## Quickstart
+
+1. Create a config using the setup wizard:
 
 ```bash
 tgcodex-bot setup --config config.yaml
 ```
 
-- Option B (manual): copy `config.example.yaml` to `config.yaml` and edit it.
-
-Then set your bot token in the env var referenced by `telegram.token_env`.
-
-Example:
+2. Export your bot token into the env var you chose in the wizard (default: `TELEGRAM_BOT_TOKEN`):
 
 ```bash
 export TELEGRAM_BOT_TOKEN="123456:ABC...keep_this_secret"
@@ -47,44 +53,63 @@ export TELEGRAM_BOT_TOKEN="123456:ABC...keep_this_secret"
 tgcodex-bot validate-config --config config.yaml
 ```
 
-4. Start:
+4. Start the bot:
 
 ```bash
-# Background (detached). Writes PID/log files to ./.tgcodex-bot/ next to config.yaml.
+# Detached background process (recommended for servers)
 tgcodex-bot start --config config.yaml
 
-# Foreground
+# Foreground (useful for debugging)
 tgcodex-bot run --config config.yaml
 ```
 
-## CLI Usage
+5. In Telegram, open a private chat with your bot and send:
 
-The CLI entrypoint is `tgcodex-bot`.
-
-### Setup Wizard
-
-This wizard writes a starter `config.yaml`:
-
-```bash
-tgcodex-bot setup --config config.yaml
+```text
+/start
+/menu
 ```
 
-It will prompt you for:
+## Configuration
 
-- `telegram.token_env` (env var name which holds your bot token)
-- `telegram.allowed_user_ids` (Telegram user IDs allowed to use the bot)
-- `state.db_path` (SQLite file for bot state)
-- `codex.bin` (path/name of the `codex` binary)
-- Local machine `default_workdir` and `allowed_roots`
-- Optional SSH machine definitions
+For a full reference, see `config.example.yaml`.
 
-### Validate Config
+Minimal example:
 
-```bash
-tgcodex-bot validate-config --config config.yaml
+```yaml
+telegram:
+  token_env: TELEGRAM_BOT_TOKEN
+  allowed_user_ids: [123456789]
+
+state:
+  db_path: tgcodex.sqlite3
+
+codex:
+  bin: codex
+  args: []
+  model: null
+  sandbox: workspace-write
+  approval_policy: untrusted
+  skip_git_repo_check: true
+
+machines:
+  default: local
+  defs:
+    local:
+      type: local
+      default_workdir: /home/ubuntu
+      allowed_roots: [/home/ubuntu, /tmp]
 ```
 
-### Run In Background (Detached)
+Notes:
+
+- `telegram.allowed_user_ids` is your security boundary: if the user ID is not listed, the bot refuses requests.
+- `allowed_roots` restricts `/cd` and path resolution to an allowlist.
+- For SSH machines you can override the remote `codex` path with `machines.defs.<name>.codex_bin`.
+
+## Running And Operations
+
+### Background Mode (Detached)
 
 ```bash
 tgcodex-bot start --config config.yaml
@@ -92,97 +117,91 @@ tgcodex-bot status --config config.yaml
 tgcodex-bot stop --config config.yaml
 ```
 
-By default `start` writes:
+By default the runtime artifacts are created next to your config:
 
 - PID file: `./.tgcodex-bot/config.yaml.pid`
 - Log file: `./.tgcodex-bot/config.yaml.log`
 
-Tip:
+Log tail:
 
 ```bash
 tail -f .tgcodex-bot/config.yaml.log
 ```
 
-### Run In Foreground
+### Foreground Mode
 
 ```bash
 tgcodex-bot run --config config.yaml
 ```
 
-## Telegram Usage
+## Telegram Commands
 
-After the bot is running, open a private chat with your bot and send:
+Start here:
 
-- `/start` (sanity check)
-- `/menu` (command list)
+- `/start`: health check
+- `/menu`: list commands
+- `/status`: current machine/workdir/session + token telemetry
 
-### Command Reference
+Session management:
 
-- `/start`: bot health check
-- `/menu`: show available commands
-- `/status`: show current machine/workdir/session and token telemetry
-- `/botstatus`: show bot version/config basics
-- `/new`: clear current session (next message starts fresh)
+- `/new`: clear the active session (next message starts fresh)
 - `/rename <title>`: set the current session title
 - `/resume`: pick a recent session to resume
-- `/machine <name>`: switch machine (clears session)
-- `/cd <path>`: change working directory (restricted by `allowed_roots`)
-- `/approval <untrusted|on-request|on-failure|never>`: update approval policy
-- `/reasoning`: toggle reasoning output (if model emits it)
-- `/plan`: toggle plan mode (preprends a “plan first” instruction)
-- `/compact`: compact the active session and continue in a new one
-- `/model [slug] [effort]`: pick a model (and thinking level if supported)
-- `/skills`: list available Codex skills on the active machine
-- `/mcp`: list MCP servers configured for Codex
 - `/exit`: cancel an active run and clear session state
 
-Normal (non-command) text messages are sent to the `codex` CLI.
+Environment:
 
-## Configuration
+- `/machine <name>`: switch machine (clears session)
+- `/cd <path>`: change working directory (restricted by `allowed_roots`)
 
-See `config.example.yaml` for a full reference.
+Run behavior:
 
-Key fields:
+- `/approval <untrusted|on-request|on-failure|never>`: update approval policy
+- `/plan`: toggle “plan mode”
+- `/reasoning`: toggle reasoning output (if enabled)
+- `/compact`: compact the active session and continue in a new one
+- `/model [slug] [effort]`: pick a model (and thinking level if supported)
+- `/skills`: list available Codex skills (on the active machine)
+- `/mcp`: list MCP servers configured for Codex
 
-- `telegram.allowed_user_ids`: only these users can interact with the bot
-- `machines.default`: initial machine name (new chats)
-- `machines.defs.<name>.allowed_roots`: filesystem allowlist for `/cd` and path resolution
-- `machines.defs.<ssh>.codex_bin`: override path to `codex` on a remote machine (useful with nvm/Homebrew PATH issues)
+Tip:
 
-Notes:
+- If you want to send a literal slash-prefixed prompt to Codex, you can type `//...` in Telegram and it will be rewritten to `/...`.
 
-- Prefer absolute paths in config, or run the bot from the directory where `config.yaml` lives.
-- In YAML, `~` expansion can be surprising; if you literally want a tilde path, quote it.
+## Approvals And Safety Model
 
-## Approvals
-
-When Codex emits an execution approval request, the bot shows inline buttons:
+Execution approvals are shown as inline buttons:
 
 - Accept once
 - Accept similar (stores a trusted prefix for this session; not offered in `untrusted`)
 - Reject
 
-Policy meanings:
+Approval policies:
 
-- `untrusted`: always ask (and keep Codex sandbox read-only; write actions are proxy-approved)
-- `on-request`: only ask when Codex explicitly requests approval
+- `untrusted`: always ask, and keep Codex sandbox read-only; stateful actions are proxy-approved in Telegram
+- `on-request`: ask only when Codex explicitly requests approval
 - `on-failure`: ask after a failure
 - `never`: never ask
 
-## State And Sessions
+## Machines (Local And SSH)
 
-The bot stores per-chat state in SQLite (`state.db_path`), including:
+You can define multiple machines and switch per chat with `/machine`.
 
-- current machine + workdir
-- active Codex session id
-- trusted prefixes for approvals
-- a small session index for `/resume`
+Local machine:
+
+- Runs on the host where `tgcodex-bot` is running.
+
+SSH machine:
+
+- Runs `codex` remotely via `asyncssh`.
+- Requires a reachable SSH host and correct auth settings.
+- If remote PATH isn’t initialized for non-interactive shells, set `machines.defs.<name>.codex_bin` to an absolute `codex` path.
 
 ## Troubleshooting
 
-### “No response” In Telegram
+### Bot Starts But Doesn’t Reply
 
-1. Verify the bot is running:
+1. Confirm it’s running:
 
 ```bash
 tgcodex-bot status --config config.yaml
@@ -194,32 +213,51 @@ tgcodex-bot status --config config.yaml
 tail -n 200 .tgcodex-bot/config.yaml.log
 ```
 
-3. Verify allowlist:
+3. Confirm you’re allowlisted:
 
-- Your Telegram user id must be in `telegram.allowed_user_ids`.
-- If it’s wrong, the bot will reply `Unauthorized` (or log denials).
+- Your Telegram user ID must be in `telegram.allowed_user_ids`.
 
-4. Ensure only one instance is polling:
+4. Ensure only one poller:
 
 - Running two instances with the same token will cause `getUpdates` conflicts.
 
-5. If remote machine is down:
+5. If your chat is set to an unreachable SSH machine:
 
-- If your chat is set to an SSH machine that can’t be reached, switch to local:
+- Switch back to local:
   - `/machine local`
 
 ### `codex` Not Found
 
-- Ensure `codex` is installed and in `PATH` for the machine you’re using.
-- For SSH machines, consider setting `machines.defs.<name>.codex_bin` to an absolute path.
+- Ensure `codex` is installed and in `PATH` on the active machine.
+- For SSH machines, set `machines.defs.<name>.codex_bin` to the absolute path.
+
+## Development
+
+Install dev dependencies:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+Lint (if you use ruff):
+
+```bash
+ruff check .
+```
 
 ## Security Notes
 
-- Keep your bot token secret (use env vars, do not commit it).
-- Do not commit your `config.yaml` if it contains personal IDs/hostnames.
-- Runtime logs are written to `./.tgcodex-bot/` and should not be committed.
+- Keep your bot token secret (use env vars; never commit it).
+- Do not commit `config.yaml` (this repo ignores it by default).
+- Logs and runtime files live in `./.tgcodex-bot/` (also ignored by default).
+- You are running a tool that can execute commands; use approval policies appropriately.
 
-## Notes
+## License
 
-- This project expects the `codex` CLI to be installed and available on each machine.
-- Network and filesystem sandboxing are controlled by `codex` settings; this bot adds an additional workdir allowlist via `allowed_roots`.
+No license file is currently included. If you intend this to be broadly reusable, add a LICENSE file before advertising it as open source.
