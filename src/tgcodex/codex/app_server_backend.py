@@ -39,7 +39,9 @@ class AppServerSettings:
 def _approval_policy_from_mode(mode: str) -> str:
     if mode == "yolo":
         return "never"
-    return "on-request"
+    # Use the stricter built-in policy so "dangerous" commands reliably trigger
+    # protocol-level approval requests, rather than relying on the model to ask.
+    return "untrusted"
 
 
 def _developer_instructions_for_mode(mode: str) -> Optional[str]:

@@ -458,7 +458,12 @@ async def on_set_approval(update: Any, context: Any) -> None:
             return
 
         runtime.store.update_chat_state(chat_id, approval_mode=mode)
-        await context.bot.send_message(chat_id=chat_id, text=f"Approval mode set to: {mode}")
+        # Apply on the next run: restart the Codex thread to avoid stale per-thread policies.
+        runtime.store.clear_session(chat_id=chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Approval mode set to: {mode}\nSession cleared. Next message starts a new session.",
+        )
         return
 
     current = state.approval_mode

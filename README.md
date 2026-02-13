@@ -178,7 +178,7 @@ Execution approvals are shown as inline buttons:
 
 Approval modes:
 
-- `on-request`: Codex requests approval when needed; the bot shows inline Approve/Reject buttons and waits.
+- `on-request`: approvals are required for commands outside Codex's trusted set; the bot shows inline Approve/Reject buttons and waits.
 - `yolo`: auto-accept approvals (no prompts). Sandbox stays enabled.
 
 ## Machines (Local And SSH)
