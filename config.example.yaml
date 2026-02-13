@@ -1,0 +1,49 @@
+telegram:
+  token_env: TELEGRAM_BOT_TOKEN
+  allowed_user_ids: [123456789]
+
+state:
+  db_path: tgcodex.sqlite3
+
+codex:
+  bin: codex
+  args: []
+  model: null
+  sandbox: workspace-write
+  approval_policy: untrusted  # untrusted|on-request|on-failure|never
+  skip_git_repo_check: true
+
+output:
+  flush_interval_ms: 250
+  min_flush_chars: 120
+  max_flush_delay_seconds: 2.0
+  max_chars: 3500
+  truncate: true
+  typing_interval_seconds: 4.0
+  show_codex_logs: false
+  show_tool_output: false
+  max_tool_output_chars: 1200
+
+approvals:
+  prefix_tokens: 2
+
+machines:
+  default: local
+  defs:
+    local:
+      type: local
+      default_workdir: /home/ubuntu/tgcodex
+      allowed_roots: [/home/ubuntu/tgcodex, /tmp]
+    # Example SSH machine
+    # buildbox:
+    #   type: ssh
+    #   host: example.com
+    #   user: ubuntu
+    #   port: 22
+    #   default_workdir: /home/ubuntu
+    #   allowed_roots: [/home/ubuntu]
+    #   auth:
+    #     use_agent: true
+    #     key_path: null
+    #   known_hosts: ~/.ssh/known_hosts
+

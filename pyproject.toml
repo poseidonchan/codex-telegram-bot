@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tgcodex-bot"
+version = "0.1.0"
+description = "Telegram bot wrapper for Codex CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "python-telegram-bot>=20.0",
+  "PyYAML>=6.0",
+  "typer>=0.9.0",
+  "rich>=13.0",
+  # Optional in practice, but included by default for remote execution.
+  "asyncssh>=2.14.0; platform_system != 'Windows'",
+]
+
+[project.scripts]
+tgcodex-bot = "tgcodex.cli:app"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "ruff>=0.4.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

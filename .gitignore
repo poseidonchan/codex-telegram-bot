@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+.env
+.env.*
+.home/
+tgcodex.sqlite3
+config.yaml

@@ -1,0 +1,2 @@
+[console_scripts]
+tgcodex-bot = tgcodex.cli:app
