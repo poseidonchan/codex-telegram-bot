@@ -7,4 +7,6 @@ __pycache__/
 .env.*
 .home/
 tgcodex.sqlite3
+tgcodex.sqlite3-*
+.tgcodex-bot/
 config.yaml

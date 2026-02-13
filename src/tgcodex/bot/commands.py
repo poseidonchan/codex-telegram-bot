@@ -39,6 +39,9 @@ from tgcodex.bot.sessions_ui import derive_session_title, format_resume_label
 def _rt(context: Any):
     return context.application.bot_data["runtime"]
 
+def _user_id(update: Any) -> int | None:
+    return getattr(getattr(update, "effective_user", None), "id", None)
+
 
 async def _deny(update: Any, context: Any) -> None:
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Unauthorized")
@@ -49,9 +52,19 @@ def _default_workdir(runtime: Any, machine_name: str) -> str:
     return md.default_workdir
 
 
+def _fmt_machine_error(machine_name: str, exc: Exception) -> str:
+    detail = str(exc).strip() or exc.__class__.__name__
+    if len(detail) > 240:
+        detail = detail[:240].rstrip() + "..."
+    return (
+        f"Failed to reach machine '{machine_name}': {detail}\n"
+        "Tip: switch machine with /machine <name> (for example: /machine local)."
+    )
+
+
 async def on_start(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     await context.bot.send_message(
@@ -62,7 +75,7 @@ async def on_start(update: Any, context: Any) -> None:
 
 async def on_menu(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     txt = "\n".join(
@@ -89,7 +102,7 @@ async def on_menu(update: Any, context: Any) -> None:
 
 async def on_status(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
 
@@ -109,7 +122,14 @@ async def on_status(update: Any, context: Any) -> None:
     # This keeps /status accurate even when stdout streaming missed token telemetry.
     if state.active_session_id:
         machine_rt = runtime.machines[state.machine_name]
-        tc = await read_latest_token_count(machine_rt.machine, session_id=state.active_session_id)
+        try:
+            tc = await read_latest_token_count(machine_rt.machine, session_id=state.active_session_id)
+        except Exception as exc:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=_fmt_machine_error(state.machine_name, exc),
+            )
+            return
         if tc is not None:
             runtime.store.update_token_telemetry(chat_id, token=tc)
             state = runtime.store.get_chat_state(chat_id) or state
@@ -119,7 +139,7 @@ async def on_status(update: Any, context: Any) -> None:
 
 async def on_botstatus(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -138,7 +158,7 @@ async def on_botstatus(update: Any, context: Any) -> None:
 
 async def on_new(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -157,7 +177,7 @@ async def on_new(update: Any, context: Any) -> None:
 
 async def on_rename(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -185,7 +205,7 @@ async def on_rename(update: Any, context: Any) -> None:
 
 async def on_exit(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -200,7 +220,7 @@ async def on_exit(update: Any, context: Any) -> None:
 
 async def on_machine(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -227,7 +247,7 @@ async def on_machine(update: Any, context: Any) -> None:
 
 async def on_cd(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -291,7 +311,7 @@ async def on_set_approval(update: Any, context: Any) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -326,7 +346,7 @@ async def on_set_approval(update: Any, context: Any) -> None:
 
 async def on_reasoning(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -346,7 +366,7 @@ async def on_model(update: Any, context: Any) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -385,7 +405,7 @@ async def on_model(update: Any, context: Any) -> None:
 
 async def on_skills(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -416,7 +436,7 @@ async def on_skills(update: Any, context: Any) -> None:
 
 async def on_mcp(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -450,7 +470,7 @@ async def on_mcp(update: Any, context: Any) -> None:
 
 async def on_compact(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -645,7 +665,7 @@ async def on_compact(update: Any, context: Any) -> None:
 
 async def on_plan(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
@@ -667,7 +687,7 @@ async def on_plan(update: Any, context: Any) -> None:
 
 async def on_resume(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -713,7 +733,7 @@ async def on_resume(update: Any, context: Any) -> None:
 
 async def on_text_message(update: Any, context: Any) -> None:
     runtime = _rt(context)
-    if not is_allowed_user(update.effective_user.id, allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
         await _deny(update, context)
         return
 
@@ -771,13 +791,20 @@ async def on_text_message(update: Any, context: Any) -> None:
         skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
     )
 
-    run = await runtime.codex.start_run(
-        machine=machine_rt.machine,
-        session_id=state.active_session_id,
-        workdir=state.workdir,
-        prompt=prompt,
-        settings=settings,
-    )
+    try:
+        run = await runtime.codex.start_run(
+            machine=machine_rt.machine,
+            session_id=state.active_session_id,
+            workdir=state.workdir,
+            prompt=prompt,
+            settings=settings,
+        )
+    except Exception as exc:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
+        )
+        return
     runtime.active_runs[chat_id] = run
     runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
 
