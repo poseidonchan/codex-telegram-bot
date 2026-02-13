@@ -6,6 +6,7 @@ __pycache__/
 .env
 .env.*
 .home/
+*.egg-info/
 tgcodex.sqlite3
 tgcodex.sqlite3-*
 .tgcodex-bot/
