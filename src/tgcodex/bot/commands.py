@@ -61,6 +61,40 @@ def _fmt_machine_error(machine_name: str, exc: Exception) -> str:
         "Tip: switch machine with /machine <name> (for example: /machine local)."
     )
 
+def _pick_fallback_local_machine_name(runtime: Any) -> Optional[str]:
+    # Prefer a machine named "local", else the first local defn found.
+    if "local" in runtime.machines:
+        md = runtime.machines["local"].defn
+        if getattr(md, "type", None) == "local":
+            return "local"
+    for name, mr in runtime.machines.items():
+        if getattr(mr.defn, "type", None) == "local":
+            return name
+    return None
+
+
+SSH_FIRST_EVENT_TIMEOUT_SECONDS = 15.0
+SSH_IDLE_EVENT_TIMEOUT_SECONDS = 30.0
+SSH_LIVENESS_PROBE_TIMEOUT_SECONDS = 2.0
+SSH_CANCEL_TIMEOUT_SECONDS = 5.0
+
+
+async def _probe_machine_reachable(machine: Any) -> bool:
+    """
+    Best-effort liveness probe used to detect "stuck typing" when an SSH machine is down.
+
+    This intentionally uses a new exec_capture call rather than reusing a RunHandle, since
+    the hung run may be tied to a dead SSH connection.
+    """
+    try:
+        await asyncio.wait_for(
+            machine.exec_capture(["true"], cwd=None),
+            timeout=SSH_LIVENESS_PROBE_TIMEOUT_SECONDS,
+        )
+        return True
+    except Exception:
+        return False
+
 
 async def on_start(update: Any, context: Any) -> None:
     runtime = _rt(context)
@@ -800,11 +834,70 @@ async def on_text_message(update: Any, context: Any) -> None:
             settings=settings,
         )
     except Exception as exc:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
-        )
-        return
+        # If the active machine is SSH and is unreachable, automatically fall back to a local
+        # machine and start a fresh session so the user isn't stuck with a "dead" chat.
+        if getattr(machine_rt.defn, "type", None) == "ssh":
+            fallback_name = _pick_fallback_local_machine_name(runtime)
+            if fallback_name:
+                fb = runtime.machines[fallback_name]
+                fb_workdir = fb.defn.default_workdir
+                detail = str(exc).strip() or exc.__class__.__name__
+                if len(detail) > 240:
+                    detail = detail[:240].rstrip() + "..."
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"SSH machine '{state.machine_name}' could not be reached: {detail}\n"
+                        f"Falling back to local machine '{fallback_name}' and starting a new session."
+                    ),
+                )
+
+                runtime.store.set_machine(chat_id=chat_id, machine_name=fallback_name, workdir=fb_workdir)
+                state = runtime.store.get_chat_state(chat_id) or state
+                machine_rt = fb
+
+                # New session title should not inherit the SSH session title.
+                default_title = derive_session_title(msg, max_len=60)
+
+                md = machine_rt.defn
+                codex_bin = md.codex_bin or runtime.cfg.codex.bin
+                approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
+                settings = RunSettings(
+                    codex_bin=codex_bin,
+                    codex_args=runtime.cfg.codex.args,
+                    model=state.model or runtime.cfg.codex.model,
+                    thinking_level=state.thinking_level,
+                    sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+                    approval_policy=approval_policy,
+                    skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+                )
+
+                try:
+                    run = await runtime.codex.start_run(
+                        machine=machine_rt.machine,
+                        session_id=None,
+                        workdir=state.workdir,
+                        prompt=prompt,
+                        settings=settings,
+                    )
+                except Exception as exc2:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Failed to start run.\n{_fmt_machine_error(fallback_name, exc2)}",
+                    )
+                    return
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
+                )
+                return
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
+            )
+            return
     runtime.active_runs[chat_id] = run
     runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
 
@@ -835,7 +928,112 @@ async def on_text_message(update: Any, context: Any) -> None:
     # When we exit early due to proxy approvals, keep the ActiveRun row for callbacks.
     clear_active_run_on_exit = True
     try:
-        async for ev in run.events():
+        events_iter = run.events()
+        first_event = True
+        ssh_fallback_attempted = False
+        while True:
+            try:
+                if getattr(machine_rt.defn, "type", None) == "ssh":
+                    timeout = SSH_FIRST_EVENT_TIMEOUT_SECONDS if first_event else SSH_IDLE_EVENT_TIMEOUT_SECONDS
+                    ev = await asyncio.wait_for(events_iter.__anext__(), timeout=timeout)
+                else:
+                    ev = await events_iter.__anext__()
+                first_event = False
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                if getattr(machine_rt.defn, "type", None) != "ssh":
+                    continue
+
+                ssh_name = state.machine_name
+                reachable = await _probe_machine_reachable(machine_rt.machine)
+                if reachable:
+                    # Remote is still reachable; this might just be a long silent run.
+                    continue
+
+                # SSH appears down: fall back to local (once per user message) and start a new session.
+                if ssh_fallback_attempted:
+                    had_output = True
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"SSH machine '{ssh_name}' could not be reached. Please /machine local and try again.",
+                    )
+                    break
+                ssh_fallback_attempted = True
+
+                fallback_name = _pick_fallback_local_machine_name(runtime)
+                if not fallback_name:
+                    had_output = True
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"SSH machine '{ssh_name}' could not be reached, and no local fallback machine is configured.",
+                    )
+                    break
+
+                # Flush any buffered output before switching machines so we don't mix sessions.
+                try:
+                    await writer.flush(force=True)
+                except Exception:
+                    pass
+
+                had_output = True
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"SSH machine '{ssh_name}' could not be reached.\n"
+                        f"Falling back to local machine '{fallback_name}' and starting a new session."
+                    ),
+                )
+
+                try:
+                    await asyncio.wait_for(run.cancel(), timeout=SSH_CANCEL_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+
+                fb = runtime.machines[fallback_name]
+                fb_workdir = fb.defn.default_workdir
+                runtime.store.set_machine(chat_id=chat_id, machine_name=fallback_name, workdir=fb_workdir)
+                state = runtime.store.get_chat_state(chat_id) or state
+                machine_rt = fb
+
+                # New session title should not inherit the SSH session title.
+                default_title = derive_session_title(msg, max_len=60)
+
+                md = machine_rt.defn
+                codex_bin = md.codex_bin or runtime.cfg.codex.bin
+                approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
+                settings = RunSettings(
+                    codex_bin=codex_bin,
+                    codex_args=runtime.cfg.codex.args,
+                    model=state.model or runtime.cfg.codex.model,
+                    thinking_level=state.thinking_level,
+                    sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+                    approval_policy=approval_policy,
+                    skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+                )
+
+                try:
+                    run = await runtime.codex.start_run(
+                        machine=machine_rt.machine,
+                        session_id=None,
+                        workdir=state.workdir,
+                        prompt=prompt,
+                        settings=settings,
+                    )
+                except Exception as exc2:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Failed to start run.\n{_fmt_machine_error(fallback_name, exc2)}",
+                    )
+                    break
+
+                runtime.active_runs[chat_id] = run
+                runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
+                events_iter = run.events()
+                first_event = True
+                recent_logs = []
+                continue
+
             if isinstance(ev, ThreadStarted):
                 if not state.active_session_id:
                     runtime.store.set_session(chat_id=chat_id, session_id=ev.thread_id, title=default_title)

@@ -85,6 +85,7 @@ class SSHMachine:
         known_hosts: str,
         use_agent: bool,
         key_path: Optional[str],
+        connect_timeout_seconds: float = 10.0,
     ) -> None:
         self.name = name
         self.type = "ssh"
@@ -94,6 +95,7 @@ class SSHMachine:
         self._known_hosts = known_hosts
         self._use_agent = use_agent
         self._key_path = key_path
+        self._connect_timeout_seconds = float(connect_timeout_seconds)
 
     async def _connect(self):
         asyncssh = _require_asyncssh()
@@ -103,7 +105,7 @@ class SSHMachine:
         if not self._use_agent:
             kwargs["agent_path"] = None
 
-        return await asyncssh.connect(
+        coro = asyncssh.connect(
             self._host,
             username=self._user,
             port=self._port,
@@ -112,6 +114,10 @@ class SSHMachine:
             agent_forwarding=False,
             **kwargs,
         )
+        # Protect the bot UX from "blackhole" SSH connects where the TCP handshake never completes.
+        if self._connect_timeout_seconds > 0:
+            return await asyncio.wait_for(coro, timeout=self._connect_timeout_seconds)
+        return await coro
 
     async def run(
         self,

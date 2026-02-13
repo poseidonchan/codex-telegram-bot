@@ -46,4 +46,4 @@ machines:
     #     use_agent: true
     #     key_path: null
     #   known_hosts: ~/.ssh/known_hosts
-
+    #   connect_timeout_seconds: 10.0

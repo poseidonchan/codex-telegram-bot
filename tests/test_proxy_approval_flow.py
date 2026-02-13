@@ -1,8 +1,10 @@
+import asyncio
 import os
 import tempfile
 import unittest
 from dataclasses import dataclass
 from typing import Any, Optional
+from unittest import mock
 
 from tgcodex.bot.commands import on_start, on_text_message
 from tgcodex.codex.events import AgentMessage, ThreadStarted, ToolStarted
@@ -13,6 +15,8 @@ from tgcodex.config import (
     LocalMachineDef,
     MachinesConfig,
     OutputConfig,
+    SSHAuthDef,
+    SSHMachineDef,
     StateConfig,
     TelegramConfig,
 )
@@ -120,6 +124,260 @@ class _FailingCodex:
 
 
 class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
+    async def test_ssh_events_stall_falls_back_to_local_and_starts_new_session(self) -> None:
+        from tgcodex.machines.base import ExecResult
+
+        class _RunStall:
+            def __init__(self) -> None:
+                self.run_id = "run-ssh-stall"
+                self.thread_id: Optional[str] = None
+                self.cancel_called = False
+
+            async def events(self):  # type: ignore[override]
+                await asyncio.Event().wait()
+                if False:  # pragma: no cover
+                    yield None
+
+            async def cancel(self) -> None:
+                self.cancel_called = True
+
+        class _RunOK:
+            def __init__(self) -> None:
+                self.run_id = "run-local-ok"
+                self.thread_id: Optional[str] = None
+                self._events = [
+                    ThreadStarted(thread_id="sess-local-1"),
+                    AgentMessage(text="hello from local"),
+                ]
+
+            async def events(self):  # type: ignore[override]
+                for ev in self._events:
+                    if isinstance(ev, ThreadStarted):
+                        self.thread_id = ev.thread_id
+                    yield ev
+
+            async def cancel(self) -> None:
+                return
+
+        class _CodexStallSshThenOk:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self._stall = _RunStall()
+                self._ok = _RunOK()
+
+            async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+                self.calls.append(str(getattr(machine, "type", "unknown")))
+                if getattr(machine, "type", None) == "ssh":
+                    return self._stall
+                return self._ok
+
+        class _FakeSshMachine:
+            name = "sshbox"
+            type = "ssh"
+
+            async def exec_capture(self, argv: list[str], cwd: Optional[str]) -> ExecResult:
+                raise TimeoutError("unreachable")
+
+        class _FakeLocalMachine:
+            name = "local"
+            type = "local"
+
+            async def exec_capture(self, argv: list[str], cwd: Optional[str]) -> ExecResult:
+                return ExecResult(exit_code=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "state.sqlite3")
+            store = Store(db_path)
+            store.open()
+            try:
+                cfg = Config(
+                    telegram=TelegramConfig(token_env="DUMMY", allowed_user_ids=(123,)),
+                    state=StateConfig(db_path=db_path),
+                    codex=CodexConfig(
+                        bin="codex",
+                        args=(),
+                        model=None,
+                        sandbox="workspace-write",
+                        approval_policy="untrusted",
+                        skip_git_repo_check=True,
+                    ),
+                    output=OutputConfig(
+                        flush_interval_ms=999999,
+                        min_flush_chars=999999,
+                        max_flush_delay_seconds=999999.0,
+                        max_chars=3500,
+                        truncate=True,
+                        typing_interval_seconds=999999.0,
+                        show_codex_logs=False,
+                        show_tool_output=False,
+                        max_tool_output_chars=1200,
+                    ),
+                    approvals=ApprovalsConfig(prefix_tokens=2),
+                    machines=MachinesConfig(
+                        default="sshbox",
+                        defs={
+                            "sshbox": SSHMachineDef(
+                                type="ssh",
+                                host="example.invalid",
+                                user="ubuntu",
+                                port=22,
+                                default_workdir="/home/ubuntu",
+                                allowed_roots=("/home/ubuntu",),
+                                auth=SSHAuthDef(use_agent=True, key_path=None),
+                                known_hosts="~/.ssh/known_hosts",
+                                connect_timeout_seconds=0.1,
+                            ),
+                            "local": LocalMachineDef(
+                                type="local",
+                                default_workdir="/tmp",
+                                allowed_roots=("/tmp",),
+                            ),
+                        },
+                    ),
+                )
+
+                runtime = type("RT", (), {})()
+                runtime.cfg = cfg
+                runtime.store = store
+                runtime.machines = {
+                    "sshbox": type("MR", (), {"machine": _FakeSshMachine(), "defn": cfg.machines.defs["sshbox"]})(),
+                    "local": type("MR", (), {"machine": _FakeLocalMachine(), "defn": cfg.machines.defs["local"]})(),
+                }
+                runtime.codex = _CodexStallSshThenOk()
+                runtime.active_runs = {}
+
+                bot = _FakeBot()
+                update = _FakeUpdate(chat_id=1, user_id=123, text="hello")
+                context = _FakeContext(bot=bot, runtime=runtime)
+
+                with (
+                    mock.patch("tgcodex.bot.commands.SSH_FIRST_EVENT_TIMEOUT_SECONDS", 0.05, create=True),
+                    mock.patch("tgcodex.bot.commands.SSH_IDLE_EVENT_TIMEOUT_SECONDS", 0.05, create=True),
+                    mock.patch("tgcodex.bot.commands.SSH_LIVENESS_PROBE_TIMEOUT_SECONDS", 0.05, create=True),
+                ):
+                    await asyncio.wait_for(on_text_message(update, context), timeout=1.0)
+
+                st = store.get_chat_state(1)
+                assert st is not None
+                self.assertEqual(st.machine_name, "local")
+                self.assertEqual(st.active_session_id, "sess-local-1")
+                self.assertTrue(bot.messages)
+                self.assertIn("Falling back to local machine", bot.messages[0].get("text", ""))
+                self.assertIn("hello from local", bot.messages[-1].get("text", ""))
+                self.assertEqual(runtime.codex.calls, ["ssh", "local"])
+            finally:
+                store.close()
+
+    async def test_ssh_start_run_failure_falls_back_to_local_and_starts_new_session(self) -> None:
+        class _RunOK:
+            def __init__(self) -> None:
+                self.run_id = "run-2"
+                self.thread_id: Optional[str] = None
+                self._events = [
+                    ThreadStarted(thread_id="sess-local-1"),
+                    AgentMessage(text="hello from local"),
+                ]
+
+            async def events(self):  # type: ignore[override]
+                for ev in self._events:
+                    if isinstance(ev, ThreadStarted):
+                        self.thread_id = ev.thread_id
+                    yield ev
+
+            async def cancel(self) -> None:
+                return
+
+        class _CodexFailSshThenOk:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self._run = _RunOK()
+
+            async def start_run(self, *, machine: Any, session_id: Any, workdir: str, prompt: str, settings: Any) -> Any:
+                self.calls.append(str(getattr(machine, "type", "unknown")))
+                if getattr(machine, "type", None) == "ssh":
+                    raise TimeoutError("ssh connect timeout")
+                return self._run
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "state.sqlite3")
+            store = Store(db_path)
+            store.open()
+            try:
+                cfg = Config(
+                    telegram=TelegramConfig(token_env="DUMMY", allowed_user_ids=(123,)),
+                    state=StateConfig(db_path=db_path),
+                    codex=CodexConfig(
+                        bin="codex",
+                        args=(),
+                        model=None,
+                        sandbox="workspace-write",
+                        approval_policy="untrusted",
+                        skip_git_repo_check=True,
+                    ),
+                    output=OutputConfig(
+                        flush_interval_ms=999999,
+                        min_flush_chars=999999,
+                        max_flush_delay_seconds=999999.0,
+                        max_chars=3500,
+                        truncate=True,
+                        typing_interval_seconds=999999.0,
+                        show_codex_logs=False,
+                        show_tool_output=False,
+                        max_tool_output_chars=1200,
+                    ),
+                    approvals=ApprovalsConfig(prefix_tokens=2),
+                    machines=MachinesConfig(
+                        default="sshbox",
+                        defs={
+                            "sshbox": SSHMachineDef(
+                                type="ssh",
+                                host="example.invalid",
+                                user="ubuntu",
+                                port=22,
+                                default_workdir="/home/ubuntu",
+                                allowed_roots=("/home/ubuntu",),
+                                auth=SSHAuthDef(use_agent=True, key_path=None),
+                                known_hosts="~/.ssh/known_hosts",
+                                connect_timeout_seconds=0.1,
+                            ),
+                            "local": LocalMachineDef(
+                                type="local",
+                                default_workdir="/tmp",
+                                allowed_roots=("/tmp",),
+                            ),
+                        },
+                    ),
+                )
+
+                runtime = type("RT", (), {})()
+                runtime.cfg = cfg
+                runtime.store = store
+                runtime.machines = {
+                    "sshbox": type("MR", (), {"machine": type("M", (), {"type": "ssh"})(), "defn": cfg.machines.defs["sshbox"]})(),
+                    "local": type("MR", (), {"machine": type("M", (), {"type": "local"})(), "defn": cfg.machines.defs["local"]})(),
+                }
+                runtime.codex = _CodexFailSshThenOk()
+                runtime.active_runs = {}
+
+                bot = _FakeBot()
+                update = _FakeUpdate(chat_id=1, user_id=123, text="hello")
+                context = _FakeContext(bot=bot, runtime=runtime)
+
+                await on_text_message(update, context)
+
+                st = store.get_chat_state(1)
+                assert st is not None
+                self.assertEqual(st.machine_name, "local")
+                self.assertEqual(st.active_session_id, "sess-local-1")
+                self.assertTrue(bot.messages)
+                # First message should mention fallback.
+                self.assertIn("Falling back to local machine", bot.messages[0].get("text", ""))
+                # Second message should include the run output.
+                self.assertIn("hello from local", bot.messages[-1].get("text", ""))
+                self.assertEqual(runtime.codex.calls, ["ssh", "local"])
+            finally:
+                store.close()
+
     async def test_untrusted_prompts_on_tool_started_and_keeps_pending_action(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = os.path.join(td, "state.sqlite3")

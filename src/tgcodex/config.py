@@ -228,6 +228,7 @@ class SSHMachineDef:
     allowed_roots: tuple[str, ...]
     auth: SSHAuthDef
     known_hosts: str
+    connect_timeout_seconds: float = 10.0
     codex_bin: Optional[str] = None
 
 
@@ -279,6 +280,10 @@ class MachinesConfig:
                     ),
                     auth=auth,
                     known_hosts=_as_str(md.get("known_hosts", "~/.ssh/known_hosts"), where=f"machines.defs.{name}.known_hosts"),
+                    connect_timeout_seconds=_as_float(
+                        md.get("connect_timeout_seconds", 10.0),
+                        where=f"machines.defs.{name}.connect_timeout_seconds",
+                    ),
                     codex_bin=_as_opt_str(md.get("codex_bin"), where=f"machines.defs.{name}.codex_bin"),
                 )
             else:

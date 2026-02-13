@@ -89,6 +89,7 @@ def build_machines(cfg: Config) -> dict[str, MachineRuntime]:
                     known_hosts=md.known_hosts,
                     use_agent=md.auth.use_agent,
                     key_path=md.auth.key_path,
+                    connect_timeout_seconds=md.connect_timeout_seconds,
                 ),
                 defn=md,
             )
