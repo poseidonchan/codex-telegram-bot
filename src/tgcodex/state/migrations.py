@@ -59,20 +59,28 @@ def migrate(conn: sqlite3.Connection) -> None:
 
     # Best-effort backfill: older DBs won't have approval_mode populated.
     # Map legacy Codex approval policies to the closest user-facing mode:
-    # - untrusted -> always
-    # - on-request/on-failure/never -> on-request
+    # - never -> yolo
+    # - everything else -> on-request
     try:
         cur.execute(
             """
             UPDATE chat_state
             SET approval_mode = CASE approval_policy
-              WHEN 'untrusted' THEN 'always'
-              WHEN 'on-request' THEN 'on-request'
-              WHEN 'on-failure' THEN 'on-request'
-              WHEN 'never' THEN 'on-request'
-              ELSE 'always'
+              WHEN 'never' THEN 'yolo'
+              ELSE 'on-request'
             END
             WHERE approval_mode IS NULL OR approval_mode = ''
+            """
+        )
+    except Exception:
+        pass
+    # Backward compat: earlier builds used approval_mode='always'; coerce to on-request.
+    try:
+        cur.execute(
+            """
+            UPDATE chat_state
+            SET approval_mode = 'on-request'
+            WHERE approval_mode = 'always'
             """
         )
     except Exception:

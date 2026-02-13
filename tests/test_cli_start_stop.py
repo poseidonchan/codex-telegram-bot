@@ -35,7 +35,7 @@ def _write_min_config(path: Path) -> None:
                 "  args: []",
                 "  model: null",
                 "  sandbox: workspace-write",
-                "  approval_policy: untrusted",
+                "  approval_policy: on-request",
                 "  skip_git_repo_check: true",
                 "",
                 "output:",

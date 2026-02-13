@@ -14,12 +14,11 @@ def _now_ts() -> int:
     return int(time.time())
 
 def _approval_mode_from_policy(policy: str) -> str:
-    # Keep this mapping conservative (avoid implicitly enabling YOLO).
-    if policy == "untrusted":
-        return "always"
-    if policy in ("on-request", "on-failure", "never"):
-        return "on-request"
-    return "always"
+    # Keep this mapping conservative: only enable YOLO when the legacy policy
+    # explicitly requested "never".
+    if policy == "never":
+        return "yolo"
+    return "on-request"
 
 
 class Store:
@@ -128,6 +127,11 @@ class Store:
             approval_mode = None
         if not isinstance(approval_mode, str) or not approval_mode:
             approval_mode = _approval_mode_from_policy(approval_policy)
+        # Backward compat: "always" mode was removed; coerce to on-request.
+        if approval_mode == "always":
+            approval_mode = "on-request"
+        if approval_mode not in ("on-request", "yolo"):
+            approval_mode = "on-request"
         return ChatState(
             chat_id=int(row["chat_id"]),
             machine_name=str(row["machine_name"]),

@@ -27,7 +27,6 @@ def fmt_status(state: ChatState, run: Optional[ActiveRun]) -> str:
         if state.thinking_level:
             model_str += f" ({state.thinking_level})"
         parts.append(f"Model: {model_str}")
-    parts.append(f"Reasoning: {'on' if state.show_reasoning else 'off'}")
     parts.append(f"Plan mode: {'on' if state.plan_mode else 'off'}")
 
     # Context: best-effort, from token_count telemetry (if available).

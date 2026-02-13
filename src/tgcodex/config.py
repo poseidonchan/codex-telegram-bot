@@ -124,7 +124,7 @@ class CodexConfig:
         else:
             sandbox_mode = _as_str(sandbox, where="codex.sandbox")  # type: ignore[assignment]
         approval_policy = _as_str(
-            d.get("approval_policy", "untrusted"), where="codex.approval_policy"
+            d.get("approval_policy", "on-request"), where="codex.approval_policy"
         )
         if approval_policy not in ("untrusted", "on-request", "on-failure", "never"):
             raise ConfigError(

@@ -10,7 +10,7 @@ codex:
   args: []
   model: null
   sandbox: workspace-write
-  approval_policy: untrusted  # untrusted|on-request|on-failure|never
+  approval_policy: on-request  # untrusted|on-request|on-failure|never
   skip_git_repo_check: true
 
 output:

@@ -13,7 +13,7 @@ class TestFormatting(unittest.TestCase):
             active_session_id="sid",
             session_title="t",
             approval_policy="untrusted",
-            approval_mode="always",
+            approval_mode="on-request",
             model=None,
             thinking_level=None,
             show_reasoning=False,
