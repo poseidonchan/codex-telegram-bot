@@ -260,4 +260,4 @@ ruff check .
 
 ## License
 
-No license file is currently included. If you intend this to be broadly reusable, add a LICENSE file before advertising it as open source.
+MIT. See `LICENSE`.
