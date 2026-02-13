@@ -35,6 +35,7 @@ class BotRuntime:
     machines: dict[str, MachineRuntime]
     codex: CodexCLIAdapter
     active_runs: dict[int, Any]  # chat_id -> CodexRun (in-memory)
+    chat_locks: dict[int, Any]  # chat_id -> asyncio.Lock
 
 
 def default_bot_command_specs() -> tuple[tuple[str, str], ...]:
@@ -96,7 +97,14 @@ def build_machines(cfg: Config) -> dict[str, MachineRuntime]:
     return out
 
 
-def run_bot(cfg: Config) -> None:
+def build_application(cfg: Config) -> Any:
+    """
+    Build a python-telegram-bot Application for the given config.
+
+    Split out from run_bot() so we can test handler configuration without
+    starting long polling.
+    """
+
     _require_ptb()
     from telegram.ext import (
         Application,
@@ -119,6 +127,7 @@ def run_bot(cfg: Config) -> None:
         machines=build_machines(cfg),
         codex=CodexCLIAdapter(),
         active_runs={},
+        chat_locks={},
     )
 
     async def _post_init(app: Application) -> None:
@@ -173,8 +182,16 @@ def run_bot(cfg: Config) -> None:
 
     app.add_handler(CallbackQueryHandler(on_callback_query))
 
+    # Long-running stream handler: must not block update processing, or callback
+    # queries (e.g. /model clicks and approvals) won't be handled with default
+    # concurrent_updates=1.
     app.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), on_text_message)
+        MessageHandler(filters.TEXT & (~filters.COMMAND), on_text_message, block=False)
     )
 
+    return app
+
+
+def run_bot(cfg: Config) -> None:
+    app = build_application(cfg)
     app.run_polling(close_loop=False)

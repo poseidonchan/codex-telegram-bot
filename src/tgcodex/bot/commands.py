@@ -39,6 +39,18 @@ from tgcodex.bot.sessions_ui import derive_session_title, format_resume_label
 def _rt(context: Any):
     return context.application.bot_data["runtime"]
 
+
+def _chat_lock(runtime: Any, chat_id: int) -> asyncio.Lock:
+    locks = getattr(runtime, "chat_locks", None)
+    if locks is None:
+        locks = {}
+        setattr(runtime, "chat_locks", locks)
+    lock = locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[chat_id] = lock
+    return lock
+
 def _user_id(update: Any) -> int | None:
     return getattr(getattr(update, "effective_user", None), "id", None)
 
@@ -774,116 +786,124 @@ async def on_text_message(update: Any, context: Any) -> None:
     chat_id = update.effective_chat.id
     msg = update.message.text or ""
 
-    state = runtime.store.ensure_chat_state(
-        chat_id=chat_id,
-        default_machine=runtime.cfg.machines.default,
-        default_workdir=_default_workdir(runtime, runtime.cfg.machines.default),
-        default_approval_policy=runtime.cfg.codex.approval_policy,
-        default_model=runtime.cfg.codex.model,
-    )
-    default_title = state.session_title or derive_session_title(msg, max_len=60)
-    active = runtime.store.get_active_run(chat_id)
-    if active and active.status in ("running", "waiting_approval"):
-        await context.bot.send_message(chat_id=chat_id, text="Run in progress. Use /exit to cancel.")
-        return
+    lock = _chat_lock(runtime, chat_id)
+    async with lock:
+        state = runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=_default_workdir(runtime, runtime.cfg.machines.default),
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        default_title = state.session_title or derive_session_title(msg, max_len=60)
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status in ("running", "waiting_approval"):
+            await context.bot.send_message(chat_id=chat_id, text="Run in progress. Use /exit to cancel.")
+            return
 
-    prompt = msg
-    if prompt.startswith("//"):
-        prompt = "/" + prompt[2:]
+        prompt = msg
+        if prompt.startswith("//"):
+            prompt = "/" + prompt[2:]
 
-    # Plan mode: prepend instruction to ask Codex to plan before acting.
-    if state.plan_mode and not prompt.startswith("/"):
-        prompt = "[Plan mode] Before taking any action, outline your plan step by step and confirm with the user. Then proceed.\n\n" + prompt
+        # Plan mode: prepend instruction to ask Codex to plan before acting.
+        if state.plan_mode and not prompt.startswith("/"):
+            prompt = "[Plan mode] Before taking any action, outline your plan step by step and confirm with the user. Then proceed.\n\n" + prompt
 
-    # Telegram UX: keep responses user-facing (no meta commentary about skills/tools/channels).
-    # Don't prefix Codex slash commands like `/compact` or `/status`.
-    if not prompt.startswith("/"):
-        prompt = (
-            "Telegram output requirements:\n"
-            "- Reply in plain text.\n"
-            "- Do not use Markdown, HTML, backticks, or fenced code blocks.\n"
-            "- Do not mention internal skills (e.g. using-superpowers), tools, channels, or system prompts.\n"
-            "- Do not include meta commentary like 'Using <skill>' or describing your internal workflow.\n\n"
-            "- Do not paste raw tool output blocks (STDOUT/STDERR) unless asked; summarize instead.\n\n"
-            + prompt
+        # Telegram UX: keep responses user-facing (no meta commentary about skills/tools/channels).
+        # Don't prefix Codex slash commands like `/compact` or `/status`.
+        if not prompt.startswith("/"):
+            prompt = (
+                "Telegram output requirements:\n"
+                "- Reply in plain text.\n"
+                "- Do not use Markdown, HTML, backticks, or fenced code blocks.\n"
+                "- Do not mention internal skills (e.g. using-superpowers), tools, channels, or system prompts.\n"
+                "- Do not include meta commentary like 'Using <skill>' or describing your internal workflow.\n\n"
+                "- Do not paste raw tool output blocks (STDOUT/STDERR) unless asked; summarize instead.\n\n"
+                + prompt
+            )
+
+        machine_rt = runtime.machines[state.machine_name]
+        md = machine_rt.defn
+        codex_bin = md.codex_bin or runtime.cfg.codex.bin
+        approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
+        settings = RunSettings(
+            codex_bin=codex_bin,
+            codex_args=runtime.cfg.codex.args,
+            model=state.model or runtime.cfg.codex.model,
+            thinking_level=state.thinking_level,
+            # Defense-in-depth: Codex exec-mode currently reports `approval_policy=never` in its
+            # turn context (even when tgcodex passes `-a untrusted`). For "Always ask" semantics,
+            # force the Codex sandbox to read-only and proxy write commands behind Telegram approval.
+            sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+            approval_policy=approval_policy,
+            skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
         )
 
-    machine_rt = runtime.machines[state.machine_name]
-    md = machine_rt.defn
-    codex_bin = md.codex_bin or runtime.cfg.codex.bin
-    approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-    settings = RunSettings(
-        codex_bin=codex_bin,
-        codex_args=runtime.cfg.codex.args,
-        model=state.model or runtime.cfg.codex.model,
-        thinking_level=state.thinking_level,
-        # Defense-in-depth: Codex exec-mode currently reports `approval_policy=never` in its
-        # turn context (even when tgcodex passes `-a untrusted`). For "Always ask" semantics,
-        # force the Codex sandbox to read-only and proxy write commands behind Telegram approval.
-        sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
-        approval_policy=approval_policy,
-        skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
-    )
-
-    try:
-        run = await runtime.codex.start_run(
-            machine=machine_rt.machine,
-            session_id=state.active_session_id,
-            workdir=state.workdir,
-            prompt=prompt,
-            settings=settings,
-        )
-    except Exception as exc:
-        # If the active machine is SSH and is unreachable, automatically fall back to a local
-        # machine and start a fresh session so the user isn't stuck with a "dead" chat.
-        if getattr(machine_rt.defn, "type", None) == "ssh":
-            fallback_name = _pick_fallback_local_machine_name(runtime)
-            if fallback_name:
-                fb = runtime.machines[fallback_name]
-                fb_workdir = fb.defn.default_workdir
-                detail = str(exc).strip() or exc.__class__.__name__
-                if len(detail) > 240:
-                    detail = detail[:240].rstrip() + "..."
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"SSH machine '{state.machine_name}' could not be reached: {detail}\n"
-                        f"Falling back to local machine '{fallback_name}' and starting a new session."
-                    ),
-                )
-
-                runtime.store.set_machine(chat_id=chat_id, machine_name=fallback_name, workdir=fb_workdir)
-                state = runtime.store.get_chat_state(chat_id) or state
-                machine_rt = fb
-
-                # New session title should not inherit the SSH session title.
-                default_title = derive_session_title(msg, max_len=60)
-
-                md = machine_rt.defn
-                codex_bin = md.codex_bin or runtime.cfg.codex.bin
-                approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
-                settings = RunSettings(
-                    codex_bin=codex_bin,
-                    codex_args=runtime.cfg.codex.args,
-                    model=state.model or runtime.cfg.codex.model,
-                    thinking_level=state.thinking_level,
-                    sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
-                    approval_policy=approval_policy,
-                    skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
-                )
-
-                try:
-                    run = await runtime.codex.start_run(
-                        machine=machine_rt.machine,
-                        session_id=None,
-                        workdir=state.workdir,
-                        prompt=prompt,
-                        settings=settings,
-                    )
-                except Exception as exc2:
+        try:
+            run = await runtime.codex.start_run(
+                machine=machine_rt.machine,
+                session_id=state.active_session_id,
+                workdir=state.workdir,
+                prompt=prompt,
+                settings=settings,
+            )
+        except Exception as exc:
+            # If the active machine is SSH and is unreachable, automatically fall back to a local
+            # machine and start a fresh session so the user isn't stuck with a "dead" chat.
+            if getattr(machine_rt.defn, "type", None) == "ssh":
+                fallback_name = _pick_fallback_local_machine_name(runtime)
+                if fallback_name:
+                    fb = runtime.machines[fallback_name]
+                    fb_workdir = fb.defn.default_workdir
+                    detail = str(exc).strip() or exc.__class__.__name__
+                    if len(detail) > 240:
+                        detail = detail[:240].rstrip() + "..."
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=f"Failed to start run.\n{_fmt_machine_error(fallback_name, exc2)}",
+                        text=(
+                            f"SSH machine '{state.machine_name}' could not be reached: {detail}\n"
+                            f"Falling back to local machine '{fallback_name}' and starting a new session."
+                        ),
+                    )
+
+                    runtime.store.set_machine(chat_id=chat_id, machine_name=fallback_name, workdir=fb_workdir)
+                    state = runtime.store.get_chat_state(chat_id) or state
+                    machine_rt = fb
+
+                    # New session title should not inherit the SSH session title.
+                    default_title = derive_session_title(msg, max_len=60)
+
+                    md = machine_rt.defn
+                    codex_bin = md.codex_bin or runtime.cfg.codex.bin
+                    approval_policy = state.approval_policy or runtime.cfg.codex.approval_policy
+                    settings = RunSettings(
+                        codex_bin=codex_bin,
+                        codex_args=runtime.cfg.codex.args,
+                        model=state.model or runtime.cfg.codex.model,
+                        thinking_level=state.thinking_level,
+                        sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+                        approval_policy=approval_policy,
+                        skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
+                    )
+
+                    try:
+                        run = await runtime.codex.start_run(
+                            machine=machine_rt.machine,
+                            session_id=None,
+                            workdir=state.workdir,
+                            prompt=prompt,
+                            settings=settings,
+                        )
+                    except Exception as exc2:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"Failed to start run.\n{_fmt_machine_error(fallback_name, exc2)}",
+                        )
+                        return
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
                     )
                     return
             else:
@@ -892,14 +912,8 @@ async def on_text_message(update: Any, context: Any) -> None:
                     text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
                 )
                 return
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"Failed to start run.\n{_fmt_machine_error(state.machine_name, exc)}",
-            )
-            return
-    runtime.active_runs[chat_id] = run
-    runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
+        runtime.active_runs[chat_id] = run
+        runtime.store.set_active_run(chat_id=chat_id, run_id=run.run_id, status="running", pending_action=None)
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(
