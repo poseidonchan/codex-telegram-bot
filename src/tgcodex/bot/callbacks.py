@@ -11,6 +11,13 @@ from tgcodex.bot.auth import is_allowed_user
 def _rt(context: Any):
     return context.application.bot_data["runtime"]
 
+def _truncate_text(s: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars].rstrip() + "\n...[truncated]...\n"
+
 
 async def on_callback_query(update: Any, context: Any) -> None:
     runtime = _rt(context)
@@ -284,12 +291,16 @@ async def on_callback_query(update: Any, context: Any) -> None:
         class _SyntheticUpdate:
             effective_chat = update.effective_chat
             effective_user = update.effective_user
+            # Cap tool output fed back into Codex to avoid blowing up the prompt/context window.
+            _max_feed = max(int(getattr(runtime.cfg.output, "max_tool_output_chars", 0) or 0), 20000)
+            _stdout = _truncate_text(res.stdout, max_chars=_max_feed)
+            _stderr = _truncate_text(res.stderr, max_chars=_max_feed)
             message = _SyntheticMsg(
                 "[Tool output]\n"
                 f"Command: {cmd}\n"
                 f"Exit code: {res.exit_code}\n"
-                f"STDOUT:\n{res.stdout}\n"
-                f"STDERR:\n{res.stderr}\n"
+                f"STDOUT:\n{_stdout}\n"
+                f"STDERR:\n{_stderr}\n"
                 "Continue."
             )
 

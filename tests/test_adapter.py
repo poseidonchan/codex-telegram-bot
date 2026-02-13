@@ -52,3 +52,23 @@ class TestCodexCLIAdapter(unittest.TestCase):
         # Regression: `--color` after `resume` makes codex exit with rc=2 on 0.98.0.
         self.assertNotIn("--color", argv)
         self.assertIn('projects."/tmp".trust_level="untrusted"', argv)
+
+    def test_build_argv_escapes_toml_strings(self) -> None:
+        settings = RunSettings(
+            codex_bin="codex",
+            codex_args=(),
+            model=None,
+            thinking_level='weird"level\\x',
+            sandbox=None,
+            approval_policy="untrusted",
+            skip_git_repo_check=False,
+        )
+        argv = CodexCLIAdapter.build_argv(
+            settings=settings,
+            session_id=None,
+            workdir='/tmp/has"quote\\slash',
+            prompt="hello",
+        )
+        # These end up inside TOML basic-string quotes.
+        self.assertIn('projects."/tmp/has\\"quote\\\\slash".trust_level="untrusted"', argv)
+        self.assertIn('model_reasoning_effort="weird\\"level\\\\x"', argv)

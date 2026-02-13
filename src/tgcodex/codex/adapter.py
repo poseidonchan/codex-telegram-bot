@@ -40,6 +40,12 @@ class CodexAdapter(Protocol):
 
 class CodexCLIAdapter:
     @staticmethod
+    def _toml_basic_escape(s: str) -> str:
+        # Escape a value for inclusion inside TOML basic-string quotes.
+        # https://toml.io/ (basic string)
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
     def build_argv(
         *,
         settings: RunSettings,
@@ -61,10 +67,12 @@ class CodexCLIAdapter:
         if settings.approval_policy == "untrusted":
             # "Always ask" semantics: force the current project to be treated as untrusted even if
             # the user's global Codex config has marked it as trusted.
-            argv += ["-c", f'projects."{workdir}".trust_level="untrusted"']
+            wd = CodexCLIAdapter._toml_basic_escape(workdir)
+            argv += ["-c", f'projects."{wd}".trust_level="untrusted"']
         if settings.thinking_level:
             # Codex CLI expects TOML-parsed values; keep it explicit.
-            argv += ["-c", f'model_reasoning_effort="{settings.thinking_level}"']
+            effort = CodexCLIAdapter._toml_basic_escape(settings.thinking_level)
+            argv += ["-c", f'model_reasoning_effort="{effort}"']
 
         argv += ["exec"]
 
