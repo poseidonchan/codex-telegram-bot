@@ -48,6 +48,31 @@ class TestDaemonStop(unittest.TestCase):
             kill.assert_called_once_with(123, signal.SIGTERM)
             self.assertFalse(pid_file.exists())
 
+    def test_stop_escalates_to_sigkill_if_sigterm_does_not_stop_in_time(self) -> None:
+        from tgcodex import daemon
+
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "bot.pid"
+            pid_file.write_text("123\n", encoding="utf-8")
+
+            with patch("tgcodex.daemon.os.kill") as kill:
+                with patch(
+                    "tgcodex.daemon._read_proc_cmdline",
+                    return_value=("python", "-m", "tgcodex.cli", "run"),
+                ):
+                    with patch(
+                        "tgcodex.daemon.is_pid_running",
+                        side_effect=[True, True, False],
+                    ):
+                        stopped = daemon.stop(pid_file, timeout_seconds=0.0)
+
+            self.assertTrue(stopped)
+            self.assertEqual(
+                kill.call_args_list,
+                [((123, signal.SIGTERM),), ((123, signal.SIGKILL),)],
+            )
+            self.assertFalse(pid_file.exists())
+
     def test_stop_refuses_to_kill_unexpected_process(self) -> None:
         from tgcodex import daemon
 

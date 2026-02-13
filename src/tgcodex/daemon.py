@@ -306,4 +306,31 @@ def stop(pid_file: Path, *, timeout_seconds: float = 10.0) -> bool:
                 pass
             return True
 
+    # Graceful SIGTERM timed out; force kill as a last resort.
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is None:
+        return False
+    try:
+        os.kill(pid, sigkill)
+    except Exception:
+        return False
+
+    # Poll briefly for exit after SIGKILL.
+    if not is_pid_running(pid):
+        try:
+            pid_file.unlink()
+        except Exception:
+            pass
+        return True
+
+    kill_deadline = time.monotonic() + 2.0
+    while time.monotonic() < kill_deadline:
+        time.sleep(0.05)
+        if not is_pid_running(pid):
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
+            return True
+
     return False
