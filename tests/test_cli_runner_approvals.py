@@ -29,6 +29,5 @@ class TestSendExecApproval(unittest.IsolatedAsyncioTestCase):
         self.assertIn("id", payload)
         self.assertIn("op", payload)
         self.assertEqual(payload["op"]["type"], "exec_approval")
-        self.assertEqual(payload["op"]["approved"], False)
+        self.assertEqual(payload["op"]["decision"], "denied")
         self.assertEqual(payload["op"]["call_id"], "call_123")
-

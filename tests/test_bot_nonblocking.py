@@ -5,6 +5,11 @@ import unittest
 from dataclasses import dataclass
 from typing import Any, Optional
 
+try:
+    import telegram  # type: ignore  # noqa: F401
+except Exception:  # pragma: no cover
+    telegram = None
+
 from tgcodex.bot.commands import on_text_message
 from tgcodex.codex.events import AgentMessage, ThreadStarted
 from tgcodex.config import (
@@ -178,6 +183,7 @@ class TestBotNonBlocking(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
+    @unittest.skipIf(telegram is None, "python-telegram-bot not installed")
     def test_text_message_handler_is_non_blocking(self) -> None:
         # When a run is in progress, we still need to process callback queries (e.g. /model clicks,
         # exec approvals). With PTB's default concurrent_updates=1, the text handler must be non-blocking.
@@ -242,4 +248,3 @@ class TestBotNonBlocking(unittest.IsolatedAsyncioTestCase):
                         rt.store.close()
                     except Exception:
                         pass
-

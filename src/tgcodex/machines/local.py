@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Optional
@@ -15,6 +17,25 @@ class _LocalRunHandle:
     stdout_task: asyncio.Task[None]
     stderr_task: asyncio.Task[None]
     stdin_task: Optional[asyncio.Task[None]]
+
+    def _kill_group(self, sig: int) -> None:
+        """
+        Best-effort: terminate/kill the entire process group so tool children don't
+        keep running after the Codex CLI parent is stopped.
+        """
+        pid = getattr(self.proc, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            # Fall back to signaling only the parent.
+            try:
+                os.kill(pid, sig)
+            except Exception:
+                pass
 
     async def wait(self) -> int:
         rc = await self.proc.wait()
@@ -31,12 +52,19 @@ class _LocalRunHandle:
     async def terminate(self) -> None:
         if self.proc.returncode is not None:
             return
-        self.proc.terminate()
+        # Prefer process-group termination so spawned commands don't keep running.
+        if os.name == "posix":
+            self._kill_group(signal.SIGTERM)
+        else:
+            self.proc.terminate()
 
     async def kill(self) -> None:
         if self.proc.returncode is not None:
             return
-        self.proc.kill()
+        if os.name == "posix":
+            self._kill_group(signal.SIGKILL)
+        else:
+            self.proc.kill()
 
     async def write_stdin(self, data: bytes) -> None:
         if self.proc.stdin is None:
@@ -79,6 +107,9 @@ class LocalMachine:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Ensure the Codex CLI is a process-group leader so we can terminate the
+            # entire group (including any spawned tool commands) on cancel.
+            start_new_session=(os.name == "posix"),
         )
 
         async def pump(stream: asyncio.StreamReader, cb: Callable[[bytes], Awaitable[None]]) -> None:
@@ -138,4 +169,3 @@ class LocalMachine:
 
     async def realpath(self, path: str) -> str:
         return str(Path(path).expanduser().resolve())
-

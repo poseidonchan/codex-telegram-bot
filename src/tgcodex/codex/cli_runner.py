@@ -68,16 +68,15 @@ class CodexRun:
         Format is best-effort and may evolve with Codex versions. Current default:
           {"type":"exec_approval","decision":"approved"|"denied"}
         """
-        # Newer protocol-style Codex streams expect an "op" envelope with a boolean and call_id:
-        #   {"id":"...","op":{"type":"exec_approval","approved":true/false,"call_id":"call_..."}}
+        # Newer protocol-style Codex streams use an "op" envelope. The approval payload carries a
+        # `decision` string (e.g. "approved"/"denied", plus other variants in newer Codex builds).
         if call_id:
             payload = {
                 "id": str(uuid.uuid4()),
                 "op": {
                     "type": "exec_approval",
-                    "approved": decision == "approved",
+                    "decision": decision,
                     "call_id": call_id,
-                    "reason": "",
                 },
             }
         else:

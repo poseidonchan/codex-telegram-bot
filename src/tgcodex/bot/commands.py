@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 from tgcodex.bot.auth import is_allowed_user
@@ -38,6 +40,36 @@ from tgcodex.bot.sessions_ui import derive_session_title, format_resume_label
 
 def _rt(context: Any):
     return context.application.bot_data["runtime"]
+
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "<BOT_TOKEN>"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "<OPENAI_KEY>"),
+)
+
+
+def _redact(s: str) -> str:
+    for pat, repl in _REDACT_PATTERNS:
+        s = pat.sub(repl, s)
+    return s
+
+
+def _cmd_tag(cmd: str) -> str:
+    return hashlib.sha256(cmd.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _cmd_preview(cmd: str, *, max_chars: int = 80) -> str:
+    one = " ".join((cmd or "").split())
+    one = _redact(one)
+    if len(one) > max_chars:
+        one = one[:max_chars].rstrip() + "..."
+    return one
+
+
+def _log(msg: str) -> None:
+    try:
+        print(f"[tgcodex-bot] {msg}", flush=True)
+    except Exception:
+        pass
 
 
 def _chat_lock(runtime: Any, chat_id: int) -> asyncio.Lock:
@@ -605,9 +637,7 @@ async def on_compact(update: Any, context: Any) -> None:
         codex_args=runtime.cfg.codex.args,
         model=state.model or runtime.cfg.codex.model,
         thinking_level=state.thinking_level,
-        # Match /chat semantics: in "Always ask" mode keep Codex sandbox read-only and do any
-        # stateful changes behind Telegram approval.
-        sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+        sandbox=runtime.cfg.codex.sandbox,
         approval_policy=approval_policy,
         skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
     )
@@ -891,10 +921,7 @@ async def on_text_message(update: Any, context: Any) -> None:
             codex_args=runtime.cfg.codex.args,
             model=state.model or runtime.cfg.codex.model,
             thinking_level=state.thinking_level,
-            # Defense-in-depth: Codex exec-mode currently reports `approval_policy=never` in its
-            # turn context (even when tgcodex passes `-a untrusted`). For "Always ask" semantics,
-            # force the Codex sandbox to read-only and proxy write commands behind Telegram approval.
-            sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+            sandbox=runtime.cfg.codex.sandbox,
             approval_policy=approval_policy,
             skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
         )
@@ -941,7 +968,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                         codex_args=runtime.cfg.codex.args,
                         model=state.model or runtime.cfg.codex.model,
                         thinking_level=state.thinking_level,
-                        sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+                        sandbox=runtime.cfg.codex.sandbox,
                         approval_policy=approval_policy,
                         skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
                     )
@@ -999,8 +1026,6 @@ async def on_text_message(update: Any, context: Any) -> None:
 
     had_output = False
     recent_logs: list[str] = []
-    # When we exit early due to proxy approvals, keep the ActiveRun row for callbacks.
-    clear_active_run_on_exit = True
     try:
         events_iter = run.events()
         first_event = True
@@ -1081,7 +1106,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                     codex_args=runtime.cfg.codex.args,
                     model=state.model or runtime.cfg.codex.model,
                     thinking_level=state.thinking_level,
-                    sandbox="read-only" if approval_policy == "untrusted" else runtime.cfg.codex.sandbox,
+                    sandbox=runtime.cfg.codex.sandbox,
                     approval_policy=approval_policy,
                     skip_git_repo_check=runtime.cfg.codex.skip_git_repo_check,
                 )
@@ -1139,116 +1164,12 @@ async def on_text_message(update: Any, context: Any) -> None:
                     await writer.flush()
                 continue
 
-            if isinstance(ev, ToolStarted) and runtime.cfg.output.show_tool_output:
-                # In "Always ask" mode, treat tool starts as approval-gated even when Codex isn't
-                # emitting exec_approval_request events (codex exec --json runs non-interactively).
-                if settings.approval_policy == "untrusted":
-                    await writer.flush(force=True)
-                    from tgcodex.bot.formatting import fmt_approval_prompt
-
-                    pending = {
-                        "kind": "proxy_exec",
-                        "command": ev.command,
-                        "cwd": state.workdir,
-                        "reason": "Always ask mode (proxy execution).",
-                    }
-                    runtime.store.set_active_run(
-                        chat_id=chat_id,
-                        run_id=run.run_id,
-                        status="waiting_approval",
-                        pending_action=pending,
-                    )
-                    kb = None
-                    try:
-                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
-
-                        kb = InlineKeyboardMarkup(
-                            [
-                                [
-                                    InlineKeyboardButton(
-                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                    ),
-                                    InlineKeyboardButton(
-                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                    ),
-                                ]
-                            ]
-                        )
-                    except Exception:
-                        kb = None
-                    had_output = True
-                    clear_active_run_on_exit = False
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=fmt_approval_prompt(
-                            command=ev.command,
-                            cwd=state.workdir,
-                            reason="Always ask mode (proxy execution).",
-                        ),
-                        reply_markup=kb,
-                    )
-                    try:
-                        await run.cancel()
-                    except Exception:
-                        pass
-                    break
-
-                writer.append(f"\n$ {ev.command}\n")
-                if writer.needs_flush():
-                    await writer.flush()
+            if isinstance(ev, ToolStarted):
+                if runtime.cfg.output.show_tool_output:
+                    writer.append(f"\n$ {ev.command}\n")
+                    if writer.needs_flush():
+                        await writer.flush()
                 continue
-
-            if isinstance(ev, ToolStarted) and settings.approval_policy == "untrusted":
-                # Even when tool output is hidden, we still need to enforce "Always ask".
-                await writer.flush(force=True)
-                from tgcodex.bot.formatting import fmt_approval_prompt
-
-                pending = {
-                    "kind": "proxy_exec",
-                    "command": ev.command,
-                    "cwd": state.workdir,
-                    "reason": "Always ask mode (proxy execution).",
-                }
-                runtime.store.set_active_run(
-                    chat_id=chat_id,
-                    run_id=run.run_id,
-                    status="waiting_approval",
-                    pending_action=pending,
-                )
-                kb = None
-                try:
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
-
-                    kb = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
-                            ]
-                        ]
-                    )
-                except Exception:
-                    kb = None
-                had_output = True
-                clear_active_run_on_exit = False
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=fmt_approval_prompt(
-                        command=ev.command,
-                        cwd=state.workdir,
-                        reason="Always ask mode (proxy execution).",
-                    ),
-                    reply_markup=kb,
-                )
-                try:
-                    await run.cancel()
-                except Exception:
-                    pass
-                break
 
             if isinstance(ev, TurnCompleted):
                 if ev.input_tokens is not None or ev.output_tokens is not None:
@@ -1266,6 +1187,12 @@ async def on_text_message(update: Any, context: Any) -> None:
 
             if isinstance(ev, ExecApprovalRequest):
                 await writer.flush(force=True)
+                _log(
+                    "exec_approval_request "
+                    f"run_id={run.run_id} call_id={ev.call_id!r} outer_id={ev.outer_id!r} "
+                    f"cmd_tag={_cmd_tag(ev.command)} cmd={_cmd_preview(ev.command)} "
+                    f"cwd={ev.cwd!r} policy={settings.approval_policy}"
+                )
                 session_id = run.thread_id or state.active_session_id
                 trusted = []
                 if session_id:
@@ -1279,10 +1206,14 @@ async def on_text_message(update: Any, context: Any) -> None:
                     prefix_tokens=runtime.cfg.approvals.prefix_tokens,
                 )
                 if not needs_prompt:
+                    _log(
+                        "exec_approval_auto "
+                        f"run_id={run.run_id} call_id={ev.call_id!r} "
+                        f"cmd_tag={_cmd_tag(ev.command)}"
+                    )
                     await run.send_exec_approval(decision="approved", call_id=ev.call_id)
                     continue
 
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                 from tgcodex.bot.formatting import fmt_approval_prompt
 
                 pending = {
@@ -1295,42 +1226,54 @@ async def on_text_message(update: Any, context: Any) -> None:
                     "prefix": prefix,
                     "session_id": session_id,
                 }
+                _log(
+                    "approval_prompt "
+                    f"kind=exec_approval run_id={run.run_id} call_id={ev.call_id!r} "
+                    f"cmd_tag={_cmd_tag(ev.command)} cmd={_cmd_preview(ev.command)} "
+                    f"cwd={ev.cwd!r} prefix={prefix!r}"
+                )
                 runtime.store.set_active_run(
                     chat_id=chat_id,
                     run_id=run.run_id,
                     status="waiting_approval",
                     pending_action=pending,
                 )
-                if settings.approval_policy == "untrusted":
-                    # "Always ask" mode: don't offer prefix trust shortcuts.
-                    kb = InlineKeyboardMarkup(
-                        [
+                kb = None
+                try:
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
+
+                    if settings.approval_policy == "untrusted":
+                        # "Always ask" mode: don't offer prefix trust shortcuts.
+                        kb = InlineKeyboardMarkup(
                             [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
+                                [
+                                    InlineKeyboardButton(
+                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
+                                    ),
+                                    InlineKeyboardButton(
+                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
+                                    ),
+                                ]
                             ]
-                        ]
-                    )
-                else:
-                    kb = InlineKeyboardMarkup(
-                        [
+                        )
+                    else:
+                        kb = InlineKeyboardMarkup(
                             [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
+                                [
+                                    InlineKeyboardButton(
+                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
+                                    ),
+                                    InlineKeyboardButton(
+                                        "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
+                                    ),
+                                    InlineKeyboardButton(
+                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
+                                    ),
+                                ]
                             ]
-                        ]
-                    )
+                        )
+                except Exception:
+                    kb = None
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=fmt_approval_prompt(command=ev.command, cwd=ev.cwd, reason=ev.reason),
@@ -1392,5 +1335,4 @@ async def on_text_message(update: Any, context: Any) -> None:
         except Exception:
             pass
         runtime.active_runs.pop(chat_id, None)
-        if clear_active_run_on_exit:
-            runtime.store.clear_active_run(chat_id=chat_id)
+        runtime.store.clear_active_run(chat_id=chat_id)

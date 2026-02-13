@@ -7,7 +7,7 @@ from typing import Any, Optional
 from unittest import mock
 
 from tgcodex.bot.commands import on_start, on_text_message
-from tgcodex.codex.events import AgentMessage, ThreadStarted, ToolStarted
+from tgcodex.codex.events import AgentMessage, ExecApprovalRequest, ThreadStarted, ToolStarted
 from tgcodex.config import (
     ApprovalsConfig,
     CodexConfig,
@@ -378,7 +378,30 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-    async def test_untrusted_prompts_on_tool_started_and_keeps_pending_action(self) -> None:
+    async def test_untrusted_prompts_on_exec_approval_request_and_keeps_pending_action(self) -> None:
+        class _RunNeedsApproval(_FakeRun):
+            def __init__(self) -> None:
+                super().__init__()
+                self._gate = asyncio.Event()
+                self._events = [
+                    ThreadStarted(thread_id="sess-1"),
+                    ExecApprovalRequest(
+                        command="mkdir -p foo",
+                        cwd="/tmp",
+                        reason="needs approval",
+                        call_id="call-1",
+                    ),
+                ]
+
+            async def events(self):  # type: ignore[override]
+                for ev in self._events:
+                    if isinstance(ev, ThreadStarted):
+                        self.thread_id = ev.thread_id
+                    yield ev
+                await self._gate.wait()
+                if False:  # pragma: no cover
+                    yield None
+
         with tempfile.TemporaryDirectory() as td:
             db_path = os.path.join(td, "state.sqlite3")
             store = Store(db_path)
@@ -419,7 +442,7 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-                run = _FakeRun()
+                run = _RunNeedsApproval()
                 runtime = type("RT", (), {})()
                 runtime.cfg = cfg
                 runtime.store = store
@@ -431,20 +454,32 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 update = _FakeUpdate(chat_id=1, user_id=123, text="create foo")
                 context = _FakeContext(bot=bot, runtime=runtime)
 
-                await on_text_message(update, context)
+                task = asyncio.create_task(on_text_message(update, context))
+                try:
+                    # Wait until the approval prompt is recorded.
+                    for _ in range(50):
+                        active = store.get_active_run(1)
+                        if active is not None and active.status == "waiting_approval":
+                            break
+                        await asyncio.sleep(0.01)
 
-                active = store.get_active_run(1)
-                self.assertIsNotNone(active)
-                assert active is not None
-                self.assertEqual(active.status, "waiting_approval")
-                self.assertIn("proxy", active.pending_action_json or "")
-                self.assertTrue(run.cancel_called)
-                # Settings must be coerced to read-only in untrusted mode (defense-in-depth).
-                self.assertEqual(runtime.codex.last_settings.sandbox, "read-only")
+                    active = store.get_active_run(1)
+                    self.assertIsNotNone(active)
+                    assert active is not None
+                    self.assertEqual(active.status, "waiting_approval")
+                    self.assertIn("exec_approval", active.pending_action_json or "")
+                    self.assertFalse(run.cancel_called)
+                    self.assertEqual(runtime.codex.last_settings.sandbox, "workspace-write")
+                finally:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
             finally:
                 store.close()
 
-    async def test_untrusted_prompts_on_readonly_tool_too(self) -> None:
+    async def test_untrusted_does_not_prompt_on_readonly_tool_started(self) -> None:
         class _RunRO(_FakeRun):
             def __init__(self) -> None:
                 super().__init__()
@@ -509,11 +544,11 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 await on_text_message(update, context)
 
                 active = store.get_active_run(1)
-                self.assertIsNotNone(active)
-                assert active is not None
-                self.assertEqual(active.status, "waiting_approval")
-                self.assertIn("proxy", active.pending_action_json or "")
-                self.assertTrue(run.cancel_called)
+                self.assertIsNone(active)
+                # Agent output should still be delivered.
+                self.assertTrue(bot.messages)
+                self.assertIn("ok", bot.messages[-1].get("text", ""))
+                self.assertFalse(run.cancel_called)
             finally:
                 store.close()
 

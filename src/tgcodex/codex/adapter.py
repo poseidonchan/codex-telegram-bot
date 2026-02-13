@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Optional, Protocol
 
 from tgcodex.codex.cli_runner import CodexRun, start_codex_process
@@ -99,6 +100,17 @@ class CodexCLIAdapter:
         prompt: str,
         settings: RunSettings,
     ) -> CodexRun:
+        # Normalize/resolve the workdir before passing it to Codex.
+        #
+        # Codex uses exact project-path keys in config (projects."<path>"). Trailing slashes or
+        # symlink differences can cause a trust override to miss, which in turn can bypass approval
+        # prompts. Use the machine's realpath to match Codex's canonicalization as closely as
+        # possible.
+        try:
+            workdir = await machine.realpath(workdir)
+        except Exception:
+            workdir = os.path.normpath(workdir)
+
         argv = self.build_argv(
             settings=settings,
             session_id=session_id,

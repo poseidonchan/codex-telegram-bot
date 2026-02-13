@@ -178,9 +178,9 @@ Execution approvals are shown as inline buttons:
 
 Approval policies:
 
-- `untrusted`: always ask, and keep Codex sandbox read-only; stateful actions are proxy-approved in Telegram
-- `on-request`: ask only when Codex explicitly requests approval
-- `on-failure`: ask after a failure
+- `untrusted`: ask for approval for any command that isn’t in Codex’s “trusted” set (tgcodex also forces the current workdir’s project trust_level to `untrusted` to avoid accidental bypass from `~/.codex/config.toml`)
+- `on-request`: the model decides when to ask for approval
+- `on-failure`: ask only when a command fails and Codex wants to retry with less sandboxing
 - `never`: never ask
 
 ## Machines (Local And SSH)

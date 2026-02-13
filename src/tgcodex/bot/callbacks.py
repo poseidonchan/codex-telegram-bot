@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +20,32 @@ def _log(msg: str) -> None:
         print(f"[tgcodex-bot] {msg}", flush=True)
     except Exception:
         pass
+
+
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Telegram bot tokens often appear in request URLs/exceptions as "<digits>:<opaque>".
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "<BOT_TOKEN>"),
+    # Best-effort OpenAI API key redaction (not exhaustive).
+    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "<OPENAI_KEY>"),
+)
+
+
+def _redact(s: str) -> str:
+    for pat, repl in _REDACT_PATTERNS:
+        s = pat.sub(repl, s)
+    return s
+
+
+def _cmd_tag(cmd: str) -> str:
+    return hashlib.sha256(cmd.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _cmd_preview(cmd: str, *, max_chars: int = 80) -> str:
+    one = " ".join((cmd or "").split())
+    one = _redact(one)
+    if len(one) > max_chars:
+        one = one[:max_chars].rstrip() + "..."
+    return one
 
 
 def _truncate_text(s: str, *, max_chars: int) -> str:
@@ -252,9 +280,15 @@ async def on_callback_query(update: Any, context: Any) -> None:
                     prefix=prefix,
                 )
 
-        runtime.store.set_active_run(chat_id=chat_id, run_id=run_id, status="running", pending_action=None)
+        cmd = pending.get("command")
+        call_id = pending.get("call_id")
+        cmd_s = cmd if isinstance(cmd, str) else ""
+        _log(
+            "approval_decision "
+            f"kind=exec_approval action={action} decision={decision} run_id={run_id} "
+            f"call_id={call_id!r} cmd_tag={_cmd_tag(cmd_s) if cmd_s else '-'} cmd={_cmd_preview(cmd_s)}"
+        )
         try:
-            call_id = pending.get("call_id")
             await run.send_exec_approval(
                 decision=decision,
                 call_id=call_id if isinstance(call_id, str) else None,
@@ -262,6 +296,9 @@ async def on_callback_query(update: Any, context: Any) -> None:
         except Exception as exc:
             await context.bot.send_message(chat_id=chat_id, text=f"Failed to send approval: {exc}")
             return
+
+        # Only clear pending state once we've successfully sent the decision.
+        runtime.store.set_active_run(chat_id=chat_id, run_id=run_id, status="running", pending_action=None)
 
         # Remove keyboard to reduce double-clicks.
         try:
@@ -286,6 +323,11 @@ async def on_callback_query(update: Any, context: Any) -> None:
             cwd = state.workdir if state else None
 
         if action == "reject":
+            _log(
+                "approval_decision "
+                f"kind=proxy_exec action=reject run_id={run_id} "
+                f"cmd_tag={_cmd_tag(cmd)} cmd={_cmd_preview(cmd)}"
+            )
             runtime.store.clear_active_run(chat_id=chat_id)
             try:
                 await q.edit_message_reply_markup(reply_markup=None)
@@ -308,10 +350,20 @@ async def on_callback_query(update: Any, context: Any) -> None:
         runtime.store.clear_active_run(chat_id=chat_id)
 
         try:
+            _log(
+                "proxy_exec_start "
+                f"run_id={run_id} machine={state.machine_name} "
+                f"cmd_tag={_cmd_tag(cmd)} cmd={_cmd_preview(cmd)}"
+            )
             res = await machine_rt.machine.exec_capture(["bash", "-lc", cmd], cwd=cwd)
         except Exception as exc:
             await context.bot.send_message(chat_id=chat_id, text=f"Command failed to start: {exc}")
             return
+        _log(
+            "proxy_exec_end "
+            f"run_id={run_id} exit_code={res.exit_code} "
+            f"cmd_tag={_cmd_tag(cmd)}"
+        )
 
         # Keep chat clean: don't spam stdout/stderr for proxy-approved commands.
         # If something goes wrong, send only the exit code; detailed output is still fed back
