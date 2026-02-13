@@ -759,6 +759,7 @@ async def on_compact(update: Any, context: Any) -> None:
             await context.bot.send_message(chat_id=chat_id, text="Compaction complete. Active session updated." + extra)
         else:
             await context.bot.send_message(chat_id=chat_id, text="Compaction finished, but new session id was not captured.")
+
     finally:
         typing_stop.set()
         try:
@@ -999,6 +1000,56 @@ async def on_text_message(update: Any, context: Any) -> None:
 
     had_output = False
     recent_logs: list[str] = []
+    pending_untrusted_tool_start: ToolStarted | None = None
+
+    async def _prompt_proxy_exec_approval(command: str) -> None:
+        nonlocal had_output, clear_active_run_on_exit
+        await writer.flush(force=True)
+        from tgcodex.bot.formatting import fmt_approval_prompt
+
+        pending = {
+            "kind": "proxy_exec",
+            "command": command,
+            "cwd": state.workdir,
+            "reason": "Always ask mode (proxy execution).",
+        }
+        runtime.store.set_active_run(
+            chat_id=chat_id,
+            run_id=run.run_id,
+            status="waiting_approval",
+            pending_action=pending,
+        )
+        kb = None
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
+
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Accept once", callback_data=f"approve_once:{run.run_id}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"reject:{run.run_id}"),
+                    ]
+                ]
+            )
+        except Exception:
+            kb = None
+
+        had_output = True
+        clear_active_run_on_exit = False
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=fmt_approval_prompt(
+                command=command,
+                cwd=state.workdir,
+                reason="Always ask mode (proxy execution).",
+            ),
+            reply_markup=kb,
+        )
+        try:
+            await run.cancel()
+        except Exception:
+            pass
+
     # When we exit early due to proxy approvals, keep the ActiveRun row for callbacks.
     clear_active_run_on_exit = True
     try:
@@ -1108,6 +1159,13 @@ async def on_text_message(update: Any, context: Any) -> None:
                 recent_logs = []
                 continue
 
+            # Give explicit ExecApprovalRequest events one chance to arrive before
+            # falling back to proxy-approval cancellation from ToolStarted.
+            if pending_untrusted_tool_start is not None and not isinstance(ev, ExecApprovalRequest):
+                await _prompt_proxy_exec_approval(command=pending_untrusted_tool_start.command)
+                pending_untrusted_tool_start = None
+                break
+
             if isinstance(ev, ThreadStarted):
                 if not state.active_session_id:
                     runtime.store.set_session(chat_id=chat_id, session_id=ev.thread_id, title=default_title)
@@ -1140,6 +1198,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                 continue
 
             if isinstance(ev, ExecApprovalRequest):
+                pending_untrusted_tool_start = None
                 await writer.flush(force=True)
                 session_id = run.thread_id or state.active_session_id
                 trusted = []
@@ -1217,55 +1276,8 @@ async def on_text_message(update: Any, context: Any) -> None:
                 # In "Always ask" mode, treat tool starts as approval-gated even when Codex isn't
                 # emitting exec_approval_request events (codex exec --json runs non-interactively).
                 if settings.approval_policy == "untrusted":
-                    await writer.flush(force=True)
-                    from tgcodex.bot.formatting import fmt_approval_prompt
-
-                    pending = {
-                        "kind": "proxy_exec",
-                        "command": ev.command,
-                        "cwd": state.workdir,
-                        "reason": "Always ask mode (proxy execution).",
-                    }
-                    runtime.store.set_active_run(
-                        chat_id=chat_id,
-                        run_id=run.run_id,
-                        status="waiting_approval",
-                        pending_action=pending,
-                    )
-                    kb = None
-                    try:
-                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
-
-                        kb = InlineKeyboardMarkup(
-                            [
-                                [
-                                    InlineKeyboardButton(
-                                        "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                    ),
-                                    InlineKeyboardButton(
-                                        "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                    ),
-                                ]
-                            ]
-                        )
-                    except Exception:
-                        kb = None
-                    had_output = True
-                    clear_active_run_on_exit = False
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=fmt_approval_prompt(
-                            command=ev.command,
-                            cwd=state.workdir,
-                            reason="Always ask mode (proxy execution).",
-                        ),
-                        reply_markup=kb,
-                    )
-                    try:
-                        await run.cancel()
-                    except Exception:
-                        pass
-                    break
+                    pending_untrusted_tool_start = ev
+                    continue
 
                 writer.append(f"\n$ {ev.command}\n")
                 if writer.needs_flush():
@@ -1274,55 +1286,8 @@ async def on_text_message(update: Any, context: Any) -> None:
 
             if isinstance(ev, ToolStarted) and settings.approval_policy == "untrusted":
                 # Even when tool output is hidden, we still need to enforce "Always ask".
-                await writer.flush(force=True)
-                from tgcodex.bot.formatting import fmt_approval_prompt
-
-                pending = {
-                    "kind": "proxy_exec",
-                    "command": ev.command,
-                    "cwd": state.workdir,
-                    "reason": "Always ask mode (proxy execution).",
-                }
-                runtime.store.set_active_run(
-                    chat_id=chat_id,
-                    run_id=run.run_id,
-                    status="waiting_approval",
-                    pending_action=pending,
-                )
-                kb = None
-                try:
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # type: ignore
-
-                    kb = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
-                            ]
-                        ]
-                    )
-                except Exception:
-                    kb = None
-                had_output = True
-                clear_active_run_on_exit = False
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=fmt_approval_prompt(
-                        command=ev.command,
-                        cwd=state.workdir,
-                        reason="Always ask mode (proxy execution).",
-                    ),
-                    reply_markup=kb,
-                )
-                try:
-                    await run.cancel()
-                except Exception:
-                    pass
-                break
+                pending_untrusted_tool_start = ev
+                continue
 
             if isinstance(ev, TurnCompleted):
                 if ev.input_tokens is not None or ev.output_tokens is not None:
@@ -1372,6 +1337,9 @@ async def on_text_message(update: Any, context: Any) -> None:
                     if writer.needs_flush():
                         await writer.flush()
                 continue
+
+        if pending_untrusted_tool_start is not None:
+            await _prompt_proxy_exec_approval(command=pending_untrusted_tool_start.command)
 
     finally:
         try:

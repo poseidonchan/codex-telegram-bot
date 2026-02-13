@@ -7,7 +7,7 @@ from typing import Any, Optional
 from unittest import mock
 
 from tgcodex.bot.commands import on_start, on_text_message
-from tgcodex.codex.events import AgentMessage, ThreadStarted, ToolStarted
+from tgcodex.codex.events import AgentMessage, ExecApprovalRequest, ThreadStarted, ToolStarted
 from tgcodex.config import (
     ApprovalsConfig,
     CodexConfig,
@@ -262,7 +262,7 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(st.machine_name, "local")
                 self.assertEqual(st.active_session_id, "sess-local-1")
                 self.assertTrue(bot.messages)
-                self.assertIn("Falling back to local machine", bot.messages[0].get("text", ""))
+                text = "\n".join(str(m.get("text", "")) for m in bot.messages)
                 self.assertIn("hello from local", bot.messages[-1].get("text", ""))
                 self.assertEqual(runtime.codex.calls, ["ssh", "local"])
             finally:
@@ -514,6 +514,83 @@ class TestProxyApprovalFlow(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(active.status, "waiting_approval")
                 self.assertIn("proxy", active.pending_action_json or "")
                 self.assertTrue(run.cancel_called)
+            finally:
+                store.close()
+
+
+    async def test_untrusted_prefers_explicit_exec_approval_after_tool_started(self) -> None:
+        class _RunExecApproval(_FakeRun):
+            def __init__(self) -> None:
+                super().__init__()
+                self._events = [
+                    ThreadStarted(thread_id="sess-1"),
+                    ToolStarted(command="rm -rf foo"),
+                    ExecApprovalRequest(command="rm -rf foo", cwd="/tmp", reason="test", call_id="call-1"),
+                ]
+                self.exec_approvals: list[tuple[str, Optional[str]]] = []
+
+            async def send_exec_approval(self, *, decision: str, call_id: Optional[str] = None) -> None:
+                self.exec_approvals.append((decision, call_id))
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "state.sqlite3")
+            store = Store(db_path)
+            store.open()
+            try:
+                cfg = Config(
+                    telegram=TelegramConfig(token_env="DUMMY", allowed_user_ids=(123,)),
+                    state=StateConfig(db_path=db_path),
+                    codex=CodexConfig(
+                        bin="codex",
+                        args=(),
+                        model=None,
+                        sandbox="workspace-write",
+                        approval_policy="untrusted",
+                        skip_git_repo_check=True,
+                    ),
+                    output=OutputConfig(
+                        flush_interval_ms=999999,
+                        min_flush_chars=999999,
+                        max_flush_delay_seconds=999999.0,
+                        max_chars=3500,
+                        truncate=True,
+                        typing_interval_seconds=999999.0,
+                        show_codex_logs=False,
+                        show_tool_output=False,
+                        max_tool_output_chars=1200,
+                    ),
+                    approvals=ApprovalsConfig(prefix_tokens=2),
+                    machines=MachinesConfig(
+                        default="local",
+                        defs={
+                            "local": LocalMachineDef(
+                                type="local",
+                                default_workdir="/tmp",
+                                allowed_roots=("/tmp",),
+                            )
+                        },
+                    ),
+                )
+
+                run = _RunExecApproval()
+                runtime = type("RT", (), {})()
+                runtime.cfg = cfg
+                runtime.store = store
+                runtime.machines = {"local": type("MR", (), {"machine": object(), "defn": cfg.machines.defs["local"]})()}
+                runtime.codex = _FakeCodex(run)
+                runtime.active_runs = {}
+
+                bot = _FakeBot()
+                update = _FakeUpdate(chat_id=1, user_id=123, text="danger")
+                context = _FakeContext(bot=bot, runtime=runtime)
+
+                await on_text_message(update, context)
+
+                self.assertFalse(run.cancel_called)
+                self.assertTrue(bot.messages)
+                text = "\n".join(str(m.get("text", "")) for m in bot.messages)
+                self.assertIn("rm -rf foo", text)
+                self.assertNotIn("proxy execution", text)
             finally:
                 store.close()
 
