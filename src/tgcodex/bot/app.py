@@ -37,6 +37,43 @@ class BotRuntime:
     active_runs: dict[int, Any]  # chat_id -> CodexRun (in-memory)
 
 
+def default_bot_command_specs() -> tuple[tuple[str, str], ...]:
+    """
+    Commands shown in Telegram's "Menu" button and slash command suggestions.
+
+    Telegram caches these per bot. Setting them on startup ensures stale/removed
+    commands (e.g. from older versions) disappear without manual BotFather edits.
+    """
+
+    return (
+        ("start", "Health check"),
+        ("menu", "Show commands"),
+        ("status", "Show current session/machine"),
+        ("botstatus", "Show bot info"),
+        ("new", "Clear session (start fresh)"),
+        ("rename", "Rename current session"),
+        ("resume", "Resume a past session"),
+        ("machine", "Switch machine"),
+        ("cd", "Change working directory"),
+        ("approval", "Set approval policy"),
+        ("reasoning", "Toggle reasoning output"),
+        ("plan", "Toggle plan mode"),
+        ("compact", "Compact current session"),
+        ("model", "Pick model (and thinking level)"),
+        ("skills", "List available skills"),
+        ("mcp", "List MCP servers"),
+        ("exit", "Cancel active run"),
+    )
+
+
+async def ensure_bot_commands(bot: Any) -> None:
+    # `set_my_commands` exists on telegram.Bot/ExtBot.
+    from telegram import BotCommand
+
+    cmds = [BotCommand(command=c, description=d) for c, d in default_bot_command_specs()]
+    await bot.set_my_commands(cmds)
+
+
 def build_machines(cfg: Config) -> dict[str, MachineRuntime]:
     out: dict[str, MachineRuntime] = {}
     for name, md in cfg.machines.defs.items():
@@ -83,7 +120,14 @@ def run_bot(cfg: Config) -> None:
         active_runs={},
     )
 
-    app = Application.builder().token(token).build()
+    async def _post_init(app: Application) -> None:
+        try:
+            await ensure_bot_commands(app.bot)
+        except Exception as exc:
+            # Non-fatal: bot can run even if Telegram API is temporarily unavailable.
+            print(f"[tgcodex-bot] Warning: failed to set bot commands: {exc}")
+
+    app = Application.builder().token(token).post_init(_post_init).build()
     app.bot_data["runtime"] = runtime
 
     from tgcodex.bot.callbacks import on_callback_query
