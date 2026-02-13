@@ -84,6 +84,10 @@ async def on_callback_query(update: Any, context: Any) -> None:
         answer_text = "Loading thinking levels..."
     elif data.startswith("thinking_select:"):
         answer_text = "Saved."
+    elif data.startswith("approval_mode_select:"):
+        answer_text = "Loading..."
+    elif data.startswith("approval_mode_confirm:"):
+        answer_text = "Saved."
     elif data == "cbtest_ping":
         answer_text = "pong"
 
@@ -137,10 +141,47 @@ async def on_callback_query(update: Any, context: Any) -> None:
             await context.bot.send_message(chat_id=chat_id, text="Active session set.")
         return
 
-    if data.startswith("approval_select:"):
-        policy = data.split(":", 1)[1]
-        if policy not in ("untrusted", "on-request", "on-failure", "never"):
-            await context.bot.send_message(chat_id=chat_id, text="Invalid policy.")
+    if data == "approval_mode_cancel":
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+
+        state = runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        current = state.approval_mode
+        modes = [
+            ("always", "✅ Always ask"),
+            ("on-request", "🤔 Ask on request"),
+            ("yolo", "☠️ YOLO"),
+        ]
+        buttons = [
+            InlineKeyboardButton(
+                f"{'✅ ' if m == current else ''}{label}",
+                callback_data=f"approval_mode_select:{m}",
+            )
+            for m, label in modes
+        ]
+        kb = InlineKeyboardMarkup([[b] for b in buttons])
+        try:
+            await q.edit_message_text(text="Choose approval mode:", reply_markup=kb)
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text="Choose approval mode:", reply_markup=kb)
+        return
+
+    if data.startswith("approval_mode_select:"):
+        mode = data.split(":", 1)[1]
+        if mode not in ("always", "on-request", "yolo"):
+            await context.bot.send_message(chat_id=chat_id, text="Invalid mode.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
             return
         runtime.store.ensure_chat_state(
             chat_id=chat_id,
@@ -149,12 +190,59 @@ async def on_callback_query(update: Any, context: Any) -> None:
             default_approval_policy=runtime.cfg.codex.approval_policy,
             default_model=runtime.cfg.codex.model,
         )
-        runtime.store.update_chat_state(chat_id, approval_policy=policy)
+
+        if mode == "yolo":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm YOLO", callback_data="approval_mode_confirm:yolo"),
+                        InlineKeyboardButton("Cancel", callback_data="approval_mode_cancel"),
+                    ]
+                ]
+            )
+            try:
+                await q.edit_message_text(
+                    text="Confirm YOLO? This disables approvals and sandbox.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Confirm YOLO? This disables approvals and sandbox.",
+                    reply_markup=kb,
+                )
+            return
+
+        runtime.store.update_chat_state(chat_id, approval_mode=mode)
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await context.bot.send_message(chat_id=chat_id, text=f"Approval policy set to: {policy}")
+        await context.bot.send_message(chat_id=chat_id, text=f"Approval mode set to: {mode}")
+        return
+
+    if data.startswith("approval_mode_confirm:"):
+        mode = data.split(":", 1)[1]
+        if mode != "yolo":
+            await context.bot.send_message(chat_id=chat_id, text="Invalid confirmation.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+        runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        runtime.store.update_chat_state(chat_id=chat_id, approval_mode="yolo")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text="Approval mode set to: yolo")
         return
 
     if data.startswith("model_select:"):

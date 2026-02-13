@@ -13,6 +13,7 @@ class TestFormatting(unittest.TestCase):
             active_session_id="sid",
             session_title="t",
             approval_policy="untrusted",
+            approval_mode="always",
             model=None,
             thinking_level=None,
             show_reasoning=False,
@@ -35,4 +36,3 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("Context remaining", out)
         self.assertIn("250 / 1,000", out)
         self.assertIn("25.0%", out)
-

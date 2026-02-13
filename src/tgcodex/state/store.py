@@ -13,6 +13,14 @@ from tgcodex.state.models import ActiveRun, ChatState, SessionIndexRow
 def _now_ts() -> int:
     return int(time.time())
 
+def _approval_mode_from_policy(policy: str) -> str:
+    # Keep this mapping conservative (avoid implicitly enabling YOLO).
+    if policy == "untrusted":
+        return "always"
+    if policy in ("on-request", "on-failure", "never"):
+        return "on-request"
+    return "always"
+
 
 class Store:
     def __init__(self, db_path: str) -> None:
@@ -48,6 +56,7 @@ class Store:
         default_machine: str,
         default_workdir: str,
         default_approval_policy: str,
+        default_approval_mode: Optional[str] = None,
         default_model: Optional[str],
         default_thinking_level: Optional[str] = None,
     ) -> ChatState:
@@ -56,18 +65,20 @@ class Store:
             return existing
 
         now = _now_ts()
+        approval_mode = default_approval_mode or _approval_mode_from_policy(default_approval_policy)
         self.conn.execute(
             """
             INSERT INTO chat_state (
               chat_id, machine_name, workdir, active_session_id, session_title,
-              approval_policy, model, thinking_level, show_reasoning, plan_mode, updated_at
-            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 0, 0, ?)
+              approval_policy, approval_mode, model, thinking_level, show_reasoning, plan_mode, updated_at
+            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, 0, 0, ?)
             """,
             (
                 chat_id,
                 default_machine,
                 default_workdir,
                 default_approval_policy,
+                approval_mode,
                 default_model,
                 default_thinking_level,
                 now,
@@ -81,6 +92,7 @@ class Store:
             active_session_id=None,
             session_title=None,
             approval_policy=default_approval_policy,
+            approval_mode=approval_mode,
             model=default_model,
             thinking_level=default_thinking_level,
             show_reasoning=False,
@@ -106,13 +118,24 @@ class Store:
         ).fetchone()
         if row is None:
             return None
+        # Backward compatibility: old DBs may not have approval_mode populated.
+        approval_policy = str(row["approval_policy"])
+        approval_mode = None
+        try:
+            if "approval_mode" in row.keys():  # type: ignore[union-attr]
+                approval_mode = row["approval_mode"]
+        except Exception:
+            approval_mode = None
+        if not isinstance(approval_mode, str) or not approval_mode:
+            approval_mode = _approval_mode_from_policy(approval_policy)
         return ChatState(
             chat_id=int(row["chat_id"]),
             machine_name=str(row["machine_name"]),
             workdir=str(row["workdir"]),
             active_session_id=row["active_session_id"],
             session_title=row["session_title"],
-            approval_policy=str(row["approval_policy"]),
+            approval_policy=approval_policy,
+            approval_mode=approval_mode,
             model=row["model"],
             thinking_level=row["thinking_level"],
             show_reasoning=bool(row["show_reasoning"]),

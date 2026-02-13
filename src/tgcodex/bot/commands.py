@@ -184,7 +184,7 @@ async def on_menu(update: Any, context: Any) -> None:
             "/resume",
             "/machine <name>",
             "/cd <path>",
-            "/approval <untrusted|on-request|on-failure|never>",
+            "/approval [always|on-request|yolo]",
             "/reasoning",
             "/plan",
             "/compact",
@@ -412,6 +412,11 @@ async def on_set_approval(update: Any, context: Any) -> None:
         await _deny(update, context)
         return
     chat_id = update.effective_chat.id
+    active = runtime.store.get_active_run(chat_id)
+    if active and active.status == "waiting_approval":
+        await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+        return
+
     state = runtime.store.ensure_chat_state(
         chat_id=chat_id,
         default_machine=runtime.cfg.machines.default,
@@ -419,26 +424,61 @@ async def on_set_approval(update: Any, context: Any) -> None:
         default_approval_policy=runtime.cfg.codex.approval_policy,
         default_model=runtime.cfg.codex.model,
     )
-    current = state.approval_policy
-    policies = [
-        ("untrusted", "Always ask"),
-        ("on-request", "Ask when requested"),
-        ("on-failure", "Ask on failure"),
-        ("never", "Never ask"),
+
+    # CLI-style usage: /approval <mode>
+    # Supported: always | on-request | yolo (plus legacy aliases for convenience).
+    msg_text = getattr(getattr(update, "message", None), "text", "") or ""
+    args = msg_text.split(maxsplit=1)
+    if len(args) >= 2:
+        raw = args[1].strip().lower()
+        mode: str | None = None
+        if raw in ("always", "untrusted"):
+            mode = "always"
+        elif raw in ("on-request", "onrequest", "on_request", "on-failure", "onfailure", "on_failure", "never"):
+            # Legacy values map to the closest supported mode (avoid implicitly enabling YOLO).
+            mode = "on-request"
+        elif raw in ("yolo",):
+            mode = "yolo"
+
+        if mode is None:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Usage: /approval [always|on-request|yolo]",
+            )
+            return
+
+        if mode == "yolo":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm YOLO", callback_data="approval_mode_confirm:yolo"),
+                        InlineKeyboardButton("Cancel", callback_data="approval_mode_cancel"),
+                    ]
+                ]
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Confirm YOLO? This disables approvals and sandbox.",
+                reply_markup=kb,
+            )
+            return
+
+        runtime.store.update_chat_state(chat_id, approval_mode=mode)
+        await context.bot.send_message(chat_id=chat_id, text=f"Approval mode set to: {mode}")
+        return
+
+    current = state.approval_mode
+    modes = [
+        ("always", "✅ Always ask"),
+        ("on-request", "🤔 Ask on request"),
+        ("yolo", "☠️ YOLO"),
     ]
-    buttons = [
-        InlineKeyboardButton(
-            f"{'✅ ' if p == current else ''}{label}",
-            callback_data=f"approval_select:{p}",
-        )
-        for p, label in policies
-    ]
+    buttons = []
+    for m, label in modes:
+        prefix = "✅ " if m == current else ""
+        buttons.append(InlineKeyboardButton(prefix + label, callback_data=f"approval_mode_select:{m}"))
     kb = InlineKeyboardMarkup([[b] for b in buttons])
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="Choose approval policy:",
-        reply_markup=kb,
-    )
+    await context.bot.send_message(chat_id=chat_id, text="Choose approval mode:", reply_markup=kb)
 
 
 async def on_reasoning(update: Any, context: Any) -> None:

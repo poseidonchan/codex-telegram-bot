@@ -56,7 +56,7 @@ def default_bot_command_specs() -> tuple[tuple[str, str], ...]:
         ("resume", "Resume a past session"),
         ("machine", "Switch machine"),
         ("cd", "Change working directory"),
-        ("approval", "Set approval policy"),
+        ("approval", "Set approval mode"),
         ("reasoning", "Toggle reasoning output"),
         ("plan", "Toggle plan mode"),
         ("compact", "Compact current session"),

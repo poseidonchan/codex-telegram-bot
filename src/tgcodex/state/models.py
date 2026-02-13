@@ -12,6 +12,7 @@ class ChatState:
     active_session_id: Optional[str]
     session_title: Optional[str]
     approval_policy: str
+    approval_mode: str
     model: Optional[str]
     thinking_level: Optional[str]
     show_reasoning: bool
