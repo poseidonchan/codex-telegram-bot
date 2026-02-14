@@ -306,14 +306,24 @@ def parse_event_obj(obj: dict[str, Any]) -> list[CodexEvent]:
     # OpenAI tool-call format: surface exec_command requests and outputs as tool events.
     if t == "function_call":
         name = obj.get("name")
-        args_s = obj.get("arguments")
-        if name == "exec_command" and isinstance(args_s, str):
-            try:
-                args = json.loads(args_s)
-            except Exception:
-                args = None
+        args_raw = obj.get("arguments")
+        if name == "exec_command" and isinstance(args_raw, (str, dict)):
+            args = None
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except Exception:
+                    args = None
+            elif isinstance(args_raw, dict):
+                args = args_raw
             if isinstance(args, dict):
                 cmd = args.get("cmd")
+                if isinstance(cmd, list):
+                    argv = [str(c) for c in cmd]
+                    try:
+                        cmd = shlex.join(argv)
+                    except Exception:
+                        cmd = " ".join(argv)
                 if isinstance(cmd, str) and cmd:
                     call_id = obj.get("call_id")
                     sandbox_perm = args.get("sandbox_permissions")
