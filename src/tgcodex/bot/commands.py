@@ -1302,17 +1302,9 @@ async def on_text_message(update: Any, context: Any) -> None:
 
                     kb = InlineKeyboardMarkup(
                         [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ Accept once", callback_data=f"approve_once:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "✅ Accept similar", callback_data=f"approve_similar:{run.run_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Reject", callback_data=f"reject:{run.run_id}"
-                                ),
-                            ]
+                            [InlineKeyboardButton("✅ Accept once", callback_data=f"approve_once:{run.run_id}")],
+                            [InlineKeyboardButton("✅ Accept similar", callback_data=f"approve_similar:{run.run_id}")],
+                            [InlineKeyboardButton("❌ Reject", callback_data=f"reject:{run.run_id}")],
                         ]
                     )
                 except Exception:
