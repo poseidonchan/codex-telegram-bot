@@ -105,6 +105,21 @@ class TestEventParsing(unittest.TestCase):
         self.assertIsInstance(evs[0], ToolStarted)
         self.assertEqual(evs[0].command, "ls -la")
 
+    def test_function_call_exec_command_accepts_dict_arguments(self) -> None:
+        obj = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": {"cmd": ["ls", "-la"]},
+                "call_id": "call_abc123",
+            },
+        }
+        evs = parse_event_obj(obj)
+        self.assertEqual(len(evs), 1)
+        self.assertIsInstance(evs[0], ToolStarted)
+        self.assertEqual(evs[0].command, "ls -la")
+
     def test_function_call_exec_command_with_escalation_maps_to_exec_approval_request(self) -> None:
         obj = {
             "type": "response_item",
@@ -112,6 +127,27 @@ class TestEventParsing(unittest.TestCase):
                 "type": "function_call",
                 "name": "exec_command",
                 "arguments": "{\"cmd\":\"rm -rf foo\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"delete foo\"}",
+                "call_id": "call_abc123",
+            },
+        }
+        evs = parse_event_obj(obj)
+        self.assertEqual(len(evs), 1)
+        self.assertIsInstance(evs[0], ExecApprovalRequest)
+        self.assertEqual(evs[0].command, "rm -rf foo")
+        self.assertEqual(evs[0].reason, "delete foo")
+        self.assertEqual(evs[0].call_id, "call_abc123")
+
+    def test_function_call_exec_command_with_dict_and_escalation_maps_to_exec_approval_request(self) -> None:
+        obj = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": {
+                    "cmd": ["rm", "-rf", "foo"],
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "delete foo",
+                },
                 "call_id": "call_abc123",
             },
         }
