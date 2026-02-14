@@ -16,6 +16,7 @@ def migrate(conn: sqlite3.Connection) -> None:
           session_title TEXT,
           approval_policy TEXT NOT NULL,
           approval_mode TEXT,
+          sandbox_mode TEXT,
           model TEXT,
           thinking_level TEXT,
           show_reasoning INTEGER NOT NULL DEFAULT 0,
@@ -39,6 +40,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     # Migration: add token columns to existing databases that pre-date this schema.
     for col, typ in [
         ("approval_mode", "TEXT"),
+        ("sandbox_mode", "TEXT"),
         ("last_input_tokens", "INTEGER"),
         ("last_output_tokens", "INTEGER"),
         ("last_cached_tokens", "INTEGER"),

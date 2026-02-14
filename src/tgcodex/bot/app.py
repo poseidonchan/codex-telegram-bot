@@ -57,6 +57,7 @@ def default_bot_command_specs() -> tuple[tuple[str, str], ...]:
         ("machine", "Switch machine"),
         ("cd", "Change working directory"),
         ("approval", "Set approval mode"),
+        ("sandbox", "Set sandbox mode"),
         ("plan", "Toggle plan mode"),
         ("compact", "Compact current session"),
         ("model", "Pick model (and thinking level)"),
@@ -171,6 +172,7 @@ def build_application(cfg: Config) -> Any:
         on_new,
         on_plan,
         on_rename,
+        on_sandbox,
         on_resume,
         on_skills,
         on_start,
@@ -191,6 +193,7 @@ def build_application(cfg: Config) -> Any:
     app.add_handler(CommandHandler("machine", on_machine))
     app.add_handler(CommandHandler("cd", on_cd))
     app.add_handler(CommandHandler("approval", on_set_approval))
+    app.add_handler(CommandHandler("sandbox", on_sandbox))
     app.add_handler(CommandHandler("plan", on_plan))
     app.add_handler(CommandHandler("compact", on_compact))
     app.add_handler(CommandHandler("model", on_model))

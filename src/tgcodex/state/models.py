@@ -13,6 +13,7 @@ class ChatState:
     session_title: Optional[str]
     approval_policy: str
     approval_mode: str
+    sandbox_mode: Optional[str]
     model: Optional[str]
     thinking_level: Optional[str]
     show_reasoning: bool

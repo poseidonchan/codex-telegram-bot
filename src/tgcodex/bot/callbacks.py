@@ -88,6 +88,10 @@ async def on_callback_query(update: Any, context: Any) -> None:
         answer_text = "Loading..."
     elif data.startswith("approval_mode_confirm:"):
         answer_text = "Saved."
+    elif data.startswith("sandbox_select:"):
+        answer_text = "Loading..."
+    elif data.startswith("sandbox_confirm:"):
+        answer_text = "Saved."
     elif data == "cbtest_ping":
         answer_text = "pong"
 
@@ -256,6 +260,122 @@ async def on_callback_query(update: Any, context: Any) -> None:
         await context.bot.send_message(
             chat_id=chat_id,
             text="Approval mode set to: yolo\nSession cleared. Next message starts a new session.",
+        )
+        return
+
+    if data == "sandbox_cancel":
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+
+        state = runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        current = state.sandbox_mode or (runtime.cfg.codex.sandbox or "workspace-write")
+        modes = [
+            ("read-only", "🔒 Read-only"),
+            ("workspace-write", "✍️ Workspace-write"),
+            ("danger-full-access", "☠️ Full access"),
+        ]
+        buttons = [
+            InlineKeyboardButton(
+                f"{'✅ ' if m == current else ''}{label}",
+                callback_data=f"sandbox_select:{m}",
+            )
+            for m, label in modes
+        ]
+        kb = InlineKeyboardMarkup([[b] for b in buttons])
+        try:
+            await q.edit_message_text(text="Choose sandbox mode:", reply_markup=kb)
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text="Choose sandbox mode:", reply_markup=kb)
+        return
+
+    if data.startswith("sandbox_select:"):
+        mode = data.split(":", 1)[1]
+        if mode not in ("read-only", "workspace-write", "danger-full-access"):
+            await context.bot.send_message(chat_id=chat_id, text="Invalid sandbox mode.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+
+        runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+
+        if mode == "danger-full-access":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Confirm full access",
+                            callback_data="sandbox_confirm:danger-full-access",
+                        ),
+                        InlineKeyboardButton("Cancel", callback_data="sandbox_cancel"),
+                    ]
+                ]
+            )
+            try:
+                await q.edit_message_text(
+                    text="Confirm danger-full-access? This weakens sandbox containment.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Confirm danger-full-access? This weakens sandbox containment.",
+                    reply_markup=kb,
+                )
+            return
+
+        runtime.store.update_chat_state(chat_id=chat_id, sandbox_mode=mode)
+        runtime.store.clear_session(chat_id=chat_id)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Sandbox mode set to: {mode}\nSession cleared. Next message starts a new session.",
+        )
+        return
+
+    if data.startswith("sandbox_confirm:"):
+        mode = data.split(":", 1)[1]
+        if mode != "danger-full-access":
+            await context.bot.send_message(chat_id=chat_id, text="Invalid sandbox confirmation.")
+            return
+        active = runtime.store.get_active_run(chat_id)
+        if active and active.status == "waiting_approval":
+            await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+            return
+        runtime.store.ensure_chat_state(
+            chat_id=chat_id,
+            default_machine=runtime.cfg.machines.default,
+            default_workdir=runtime.machines[runtime.cfg.machines.default].defn.default_workdir,
+            default_approval_policy=runtime.cfg.codex.approval_policy,
+            default_model=runtime.cfg.codex.model,
+        )
+        runtime.store.update_chat_state(chat_id=chat_id, sandbox_mode="danger-full-access")
+        runtime.store.clear_session(chat_id=chat_id)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Sandbox mode set to: danger-full-access\nSession cleared. Next message starts a new session.",
         )
         return
 
