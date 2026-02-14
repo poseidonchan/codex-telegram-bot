@@ -3,7 +3,7 @@ telegram:
   allowed_user_ids: [123456789]
 
 state:
-  db_path: tgcodex.sqlite3
+  db_path: ~/.tgcodex/tgcodex.sqlite3
 
 codex:
   bin: codex
