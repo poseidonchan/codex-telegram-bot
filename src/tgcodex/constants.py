@@ -1,2 +1,1 @@
-DEFAULT_DB_PATH = "tgcodex.sqlite3"
-
+DEFAULT_DB_PATH = "~/.tgcodex/tgcodex.sqlite3"

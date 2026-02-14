@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ import typer  # noqa: E402
 
 from tgcodex.config import load_config, validate_config  # noqa: E402
 from tgcodex import daemon  # noqa: E402
+from tgcodex.constants import DEFAULT_DB_PATH  # noqa: E402
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -90,6 +92,10 @@ def _validate_allowed_roots(roots: list[str], *, where: str) -> list[str]:
         if not _is_absolute_or_tilde(r):
             raise typer.BadParameter(f"{where} entries must be absolute (or ~): {r!r}")
     return roots
+
+
+def _is_env_var_name(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value))
 
 
 def _tail_text(path: Path, *, max_lines: int = 40) -> str:
@@ -162,11 +168,14 @@ def setup_cmd(
         raise typer.Exit(1)
 
     token_env = typer.prompt(
-        "Step 1/6: Telegram bot token env var",
+        "Step 1/6: Telegram bot token env var name (not the token value)",
         default="TELEGRAM_BOT_TOKEN",
     ).strip()
     if not token_env:
         typer.echo("ERROR: token_env cannot be empty")
+        raise typer.Exit(2)
+    if not _is_env_var_name(token_env):
+        typer.echo("ERROR: token_env must be a valid env var name")
         raise typer.Exit(2)
 
     allowed_raw = typer.prompt(
@@ -179,7 +188,7 @@ def setup_cmd(
 
     db_path = typer.prompt(
         "Step 3/6: SQLite state DB path",
-        default="tgcodex.sqlite3",
+        default=DEFAULT_DB_PATH,
     ).strip()
     if not db_path:
         typer.echo("ERROR: db_path cannot be empty")

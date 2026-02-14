@@ -45,11 +45,26 @@ class TestSetupWizard(unittest.TestCase):
             obj = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
             self.assertEqual(obj["telegram"]["token_env"], "TELEGRAM_BOT_TOKEN")
             self.assertEqual(obj["telegram"]["allowed_user_ids"], [12345])
-            self.assertEqual(obj["state"]["db_path"], "tgcodex.sqlite3")
+            self.assertEqual(obj["state"]["db_path"], "~/.tgcodex/tgcodex.sqlite3")
             self.assertEqual(obj["codex"]["bin"], "codex")
             self.assertEqual(obj["machines"]["default"], "local")
             self.assertEqual(obj["machines"]["defs"]["local"]["default_workdir"], "/tmp")
             self.assertEqual(obj["machines"]["defs"]["local"]["allowed_roots"], ["/tmp", "/var/tmp"])
+
+    def test_setup_rejects_raw_token_for_token_env(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "config.yaml"
+            user_input = "\n".join(
+                [
+                    "123456:ABCDEF",  # invalid env var name, likely raw token
+                ]
+            )
+            res = runner.invoke(
+                app, ["setup", "--config", str(cfg_path)], input=user_input + "\n"
+            )
+            self.assertNotEqual(res.exit_code, 0)
+            self.assertIn("token_env must be a valid env var name", res.output)
 
     def test_setup_refuses_to_overwrite_without_force(self) -> None:
         runner = CliRunner()

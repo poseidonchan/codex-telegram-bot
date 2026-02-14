@@ -7,6 +7,21 @@ from tgcodex.state.store import Store
 
 
 class TestStoreTokenTelemetry(unittest.TestCase):
+    def test_open_expands_user_in_db_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = td
+            try:
+                store = Store("~/.tgcodex/state.sqlite3")
+                store.open()
+                store.close()
+                self.assertTrue(os.path.exists(os.path.join(td, ".tgcodex", "state.sqlite3")))
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
     def test_update_token_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = os.path.join(td, "state.sqlite3")
@@ -52,4 +67,3 @@ class TestStoreTokenTelemetry(unittest.TestCase):
                 self.assertEqual(state.rate_secondary_resets_at, 1700001000)
             finally:
                 store.close()
-
