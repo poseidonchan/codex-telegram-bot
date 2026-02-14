@@ -1346,6 +1346,36 @@ async def on_text_message(update: Any, context: Any) -> None:
                     f"cwd={cwd_s!r} mode={settings.approval_mode} kind={request_kind}"
                 )
 
+                # Enforce sandbox semantics at the Telegram client layer. In read-only mode we
+                # decline write actions proactively so "read-only" actually means no writes.
+                effective_sandbox = state.sandbox_mode or runtime.cfg.codex.sandbox
+                if effective_sandbox == "read-only":
+                    from tgcodex.codex.command_intent import needs_write_approval
+
+                    is_write = (request_kind == "fileChange") or needs_write_approval(cmd_s)
+                    if is_write:
+                        _log(
+                            "sandbox_readonly_decline "
+                            f"run_id={run.run_id} rpc_id={rpc_id!r} "
+                            f"cmd_tag={_cmd_tag(cmd_s)} cmd={_cmd_preview(cmd_s)}"
+                        )
+                        try:
+                            await run.respond_approval(
+                                rpc_id=rpc_id,
+                                request_kind=request_kind,
+                                decision="decline",
+                            )
+                        except Exception as exc:
+                            await context.bot.send_message(chat_id=chat_id, text=f"Failed to decline: {exc}")
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "Sandbox is read-only, so I won't run write actions.\n"
+                                "Switch sandbox to allow writes: /sandbox workspace-write"
+                            ),
+                        )
+                        continue
+
                 if settings.approval_mode == "yolo":
                     # Even in YOLO, Codex may still request approval in edge cases. Auto-accept.
                     try:

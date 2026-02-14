@@ -60,6 +60,18 @@ def needs_write_approval(command: str) -> bool:
     if not tokens:
         return False
 
+    # Common wrappers: the actual command is inside the -lc string.
+    # Example: /bin/bash -lc "cd /home/ubuntu && mkdir -p foo"
+    if (
+        len(tokens) >= 3
+        and tokens[0] in ("bash", "/bin/bash", "sh", "/bin/sh")
+        and tokens[1] == "-lc"
+        and isinstance(tokens[2], str)
+        and tokens[2].strip()
+    ):
+        # Recurse on the inner command string.
+        return needs_write_approval(tokens[2])
+
     for i, tok in enumerate(tokens):
         # Shell redirections can write even if the command itself is "read-only".
         if ">" in tok and tok != "2>&1":
@@ -84,4 +96,3 @@ def needs_write_approval(command: str) -> bool:
                 return True
 
     return False
-

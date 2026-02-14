@@ -22,6 +22,7 @@ def fmt_status(state: ChatState, run: Optional[ActiveRun]) -> str:
     parts.append(f"Session title: {state.session_title or 'None'}")
     parts.append(f"Session ID: {state.active_session_id or 'None'}")
     parts.append(f"Approval mode: {state.approval_mode}")
+    parts.append(f"Sandbox mode: {state.sandbox_mode or 'default'}")
     if state.model:
         model_str = state.model
         if state.thinking_level:
