@@ -56,6 +56,7 @@ class Store:
         default_workdir: str,
         default_approval_policy: str,
         default_approval_mode: Optional[str] = None,
+        default_sandbox_mode: Optional[str] = None,
         default_model: Optional[str],
         default_thinking_level: Optional[str] = None,
     ) -> ChatState:
@@ -65,12 +66,13 @@ class Store:
 
         now = _now_ts()
         approval_mode = default_approval_mode or _approval_mode_from_policy(default_approval_policy)
+        sandbox_mode = default_sandbox_mode
         self.conn.execute(
             """
             INSERT INTO chat_state (
               chat_id, machine_name, workdir, active_session_id, session_title,
-              approval_policy, approval_mode, model, thinking_level, show_reasoning, plan_mode, updated_at
-            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, 0, 0, ?)
+              approval_policy, approval_mode, sandbox_mode, model, thinking_level, show_reasoning, plan_mode, updated_at
+            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 0, 0, ?)
             """,
             (
                 chat_id,
@@ -78,6 +80,7 @@ class Store:
                 default_workdir,
                 default_approval_policy,
                 approval_mode,
+                sandbox_mode,
                 default_model,
                 default_thinking_level,
                 now,
@@ -92,6 +95,7 @@ class Store:
             session_title=None,
             approval_policy=default_approval_policy,
             approval_mode=approval_mode,
+            sandbox_mode=sandbox_mode,
             model=default_model,
             thinking_level=default_thinking_level,
             show_reasoning=False,
@@ -132,6 +136,15 @@ class Store:
             approval_mode = "on-request"
         if approval_mode not in ("on-request", "yolo"):
             approval_mode = "on-request"
+
+        sandbox_mode = None
+        try:
+            if "sandbox_mode" in row.keys():  # type: ignore[union-attr]
+                sandbox_mode = row["sandbox_mode"]
+        except Exception:
+            sandbox_mode = None
+        if not isinstance(sandbox_mode, str) or not sandbox_mode:
+            sandbox_mode = None
         return ChatState(
             chat_id=int(row["chat_id"]),
             machine_name=str(row["machine_name"]),
@@ -140,6 +153,7 @@ class Store:
             session_title=row["session_title"],
             approval_policy=approval_policy,
             approval_mode=approval_mode,
+            sandbox_mode=sandbox_mode,
             model=row["model"],
             thinking_level=row["thinking_level"],
             show_reasoning=bool(row["show_reasoning"]),

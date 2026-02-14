@@ -183,6 +183,7 @@ async def on_menu(update: Any, context: Any) -> None:
             "/machine <name>",
             "/cd <path>",
             "/approval [on-request|yolo]",
+            "/sandbox [read-only|workspace-write|danger-full-access]",
             "/plan",
             "/compact",
             "/model [slug] [effort]",
@@ -479,6 +480,94 @@ async def on_set_approval(update: Any, context: Any) -> None:
     await context.bot.send_message(chat_id=chat_id, text="Choose approval mode:", reply_markup=kb)
 
 
+async def on_sandbox(update: Any, context: Any) -> None:
+    """
+    Configure Codex sandbox mode for this chat.
+
+    This affects what Codex is allowed to do. It is separate from approvals (which only control
+    whether Codex must pause and ask before a risky action).
+    """
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    runtime = _rt(context)
+    if not is_allowed_user(_user_id(update), allowed_user_ids=runtime.cfg.telegram.allowed_user_ids):
+        await _deny(update, context)
+        return
+    chat_id = update.effective_chat.id
+    active = runtime.store.get_active_run(chat_id)
+    if active and active.status == "waiting_approval":
+        await context.bot.send_message(chat_id=chat_id, text="Approval pending — approve/reject first.")
+        return
+
+    state = runtime.store.ensure_chat_state(
+        chat_id=chat_id,
+        default_machine=runtime.cfg.machines.default,
+        default_workdir=_default_workdir(runtime, runtime.cfg.machines.default),
+        default_approval_policy=runtime.cfg.codex.approval_policy,
+        default_model=runtime.cfg.codex.model,
+    )
+
+    # CLI-style usage: /sandbox <mode>
+    msg_text = getattr(getattr(update, "message", None), "text", "") or ""
+    args = msg_text.split(maxsplit=1)
+    if len(args) >= 2:
+        raw = args[1].strip().lower()
+        if raw in ("readonly", "read-only", "read_only", "ro"):
+            mode = "read-only"
+        elif raw in ("workspace-write", "workspace_write", "workspace", "write"):
+            mode = "workspace-write"
+        elif raw in ("danger-full-access", "danger_full_access", "danger", "full-access", "full"):
+            mode = "danger-full-access"
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Usage: /sandbox [read-only|workspace-write|danger-full-access]",
+            )
+            return
+
+        if mode == "danger-full-access":
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Confirm full access", callback_data="sandbox_confirm:danger-full-access"),
+                        InlineKeyboardButton("Cancel", callback_data="sandbox_cancel"),
+                    ]
+                ]
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Confirm danger-full-access? This weakens sandbox containment.",
+                reply_markup=kb,
+            )
+            return
+
+        runtime.store.update_chat_state(chat_id, sandbox_mode=mode)
+        runtime.store.clear_session(chat_id=chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Sandbox mode set to: {mode}\nSession cleared. Next message starts a new session.",
+        )
+        return
+
+    current = state.sandbox_mode or (runtime.cfg.codex.sandbox or "workspace-write")
+    modes = [
+        ("read-only", "🔒 Read-only"),
+        ("workspace-write", "✍️ Workspace-write"),
+        ("danger-full-access", "☠️ Full access"),
+    ]
+    buttons = []
+    for m, label in modes:
+        prefix = "✅ " if m == current else ""
+        buttons.append(InlineKeyboardButton(prefix + label, callback_data=f"sandbox_select:{m}"))
+    kb = InlineKeyboardMarkup([[b] for b in buttons])
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Choose sandbox mode:",
+        reply_markup=kb,
+    )
+
+
 async def on_model(update: Any, context: Any) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -656,7 +745,7 @@ async def on_compact(update: Any, context: Any) -> None:
         codex_args=runtime.cfg.codex.args,
         model=state.model or runtime.cfg.codex.model,
         thinking_level=state.thinking_level,
-        sandbox=runtime.cfg.codex.sandbox,
+        sandbox=state.sandbox_mode or runtime.cfg.codex.sandbox,
         approval_mode=state.approval_mode,
     )
 
@@ -946,7 +1035,7 @@ async def on_text_message(update: Any, context: Any) -> None:
             codex_args=runtime.cfg.codex.args,
             model=state.model or runtime.cfg.codex.model,
             thinking_level=state.thinking_level,
-            sandbox=runtime.cfg.codex.sandbox,
+            sandbox=state.sandbox_mode or runtime.cfg.codex.sandbox,
             approval_mode=state.approval_mode,
         )
 
@@ -993,7 +1082,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                         codex_args=runtime.cfg.codex.args,
                         model=state.model or runtime.cfg.codex.model,
                         thinking_level=state.thinking_level,
-                        sandbox=runtime.cfg.codex.sandbox,
+                        sandbox=state.sandbox_mode or runtime.cfg.codex.sandbox,
                         approval_mode=state.approval_mode,
                     )
 
@@ -1139,7 +1228,7 @@ async def on_text_message(update: Any, context: Any) -> None:
                     codex_args=runtime.cfg.codex.args,
                     model=state.model or runtime.cfg.codex.model,
                     thinking_level=state.thinking_level,
-                    sandbox=runtime.cfg.codex.sandbox,
+                    sandbox=state.sandbox_mode or runtime.cfg.codex.sandbox,
                     approval_mode=state.approval_mode,
                 )
 

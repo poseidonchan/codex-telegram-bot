@@ -158,6 +158,7 @@ Environment:
 Run behavior:
 
 - `/approval [on-request|yolo]`: update approval mode (legacy aliases like `untrusted`, `always`, `never` still work)
+- `/sandbox [read-only|workspace-write|danger-full-access]`: set sandbox mode for this chat (applies next message; clears session)
 - `/plan`: toggle “plan mode”
 - `/compact`: compact the active session and continue in a new one
 - `/model [slug] [effort]`: pick a model (and thinking level if supported)
@@ -180,6 +181,19 @@ Approval modes:
 
 - `on-request`: approvals are required for commands outside Codex's trusted set; the bot shows inline Approve/Reject buttons and waits.
 - `yolo`: auto-accept approvals (no prompts). Sandbox stays enabled.
+
+## Sandbox vs YOLO
+
+These are separate controls:
+
+- **Sandbox** controls what Codex is allowed to do when it runs tools/commands.
+  - `read-only`: Codex can inspect, but should not modify files.
+  - `workspace-write`: Codex can write within the allowed workspace scope.
+  - `danger-full-access`: broad permissions; use only when you understand the risk.
+
+- **YOLO** controls approvals only.
+  - In tgcodex, `yolo` means the bot auto-accepts approval requests.
+  - **YOLO does not disable the sandbox**. To change sandbox behavior, use `/sandbox`.
 
 ## Machines (Local And SSH)
 

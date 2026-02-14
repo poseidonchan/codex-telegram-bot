@@ -14,6 +14,7 @@ class TestFormatting(unittest.TestCase):
             session_title="t",
             approval_policy="untrusted",
             approval_mode="on-request",
+            sandbox_mode=None,
             model=None,
             thinking_level=None,
             show_reasoning=False,
