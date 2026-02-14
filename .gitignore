@@ -12,3 +12,7 @@ tgcodex.sqlite3-*
 .tgcodex-bot/
 .worktrees/
 config.yaml
+
+# Local probe artifacts
+test_approval_*.txt
+test_tgcodex_probe.txt
