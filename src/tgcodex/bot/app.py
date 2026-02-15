@@ -224,10 +224,12 @@ def run_bot(cfg: Config) -> None:
     app = build_application(cfg)
     # Be explicit about callback_query to avoid misconfiguration where inline button clicks
     # never reach the bot.
-    # drop_pending_updates=True helps avoid "Conflict: terminated by other getUpdates request"
-    # errors when restarting the bot after a previous instance wasn't properly stopped.
+    # bootstrap_retries=3 handles "Conflict: terminated by other getUpdates request" errors
+    # that occur when restarting the bot shortly after a previous instance was stopped
+    # (Telegram's polling timeout can linger for ~10s). Retries allow the old connection
+    # to timeout gracefully without dropping pending updates.
     app.run_polling(
         allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,
+        bootstrap_retries=3,
         close_loop=False,
     )
