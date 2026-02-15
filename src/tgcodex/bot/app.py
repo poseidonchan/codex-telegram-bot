@@ -71,7 +71,9 @@ async def ensure_bot_commands(bot: Any) -> None:
     # `set_my_commands` exists on telegram.Bot/ExtBot.
     from telegram import BotCommand
 
-    cmds = [BotCommand(command=c, description=d) for c, d in default_bot_command_specs()]
+    cmds = [
+        BotCommand(command=c, description=d) for c, d in default_bot_command_specs()
+    ]
     await bot.set_my_commands(cmds)
 
 
@@ -222,4 +224,12 @@ def run_bot(cfg: Config) -> None:
     app = build_application(cfg)
     # Be explicit about callback_query to avoid misconfiguration where inline button clicks
     # never reach the bot.
-    app.run_polling(allowed_updates=["message", "callback_query"], close_loop=False)
+    # bootstrap_retries=3 handles "Conflict: terminated by other getUpdates request" errors
+    # that occur when restarting the bot shortly after a previous instance was stopped
+    # (Telegram's polling timeout can linger for ~10s). Retries allow the old connection
+    # to timeout gracefully without dropping pending updates.
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        bootstrap_retries=3,
+        close_loop=False,
+    )
